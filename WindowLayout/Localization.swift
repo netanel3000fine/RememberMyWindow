@@ -64,15 +64,15 @@ private let translationDict: [String: String] = [
     // Slide 3 — Menu Bar
     "Two Clicks, Two Powers": "שתי לחיצות, שתי יכולות",
     "Left click: restore the current app and open the window list. Right click: restore every app in one shot.": "לחיצה שמאלית: שחזר את היישום הנוכחי ופתח את הרשימה. לחיצה ימנית: שחזר את כל היישומים בבת אחת.",
-    // Slide 4 — Cmd+D
+    // Slide 4 — desktop toggle
     "Hide Everything, Instantly": "הסתר הכל, מיד",
-    "Press ⌘D and every window vanishes — desktop is clean. Press again and they all come back exactly where they were.": "לחץ ⌘D וכל החלונות נעלמים — שולחן עבודה נקי. לחץ שוב והם חוזרים בדיוק למקומם.",
+    "Press %@ and every window vanishes — desktop is clean. Press again and they all come back exactly where they were.": "לחץ %@ וכל החלונות נעלמים — שולחן עבודה נקי. לחץ שוב והם חוזרים בדיוק למקומם.",
     // Slide 5 — Cmd+Shift+R
     "Do More After Every Restore": "עשה יותר אחרי כל שחזור",
     "After restoring windows, RememberMyWindows can fire ⌘⇧R in your active app — Reading Mode in Safari, Hard Reload in Chrome, or PiP for a video.": "לאחר שחזור החלונות, RememberMyWindows יכול לשלוח ⌘⇧R ליישום הפעיל שלך — מצב קריאה בספארי, רענון מלא בכרום, או PiP לסרטון.",
     // Slide 6 — Settings
     "Fine-Tune How It Works": "כוונן את האופן שבו זה עובד",
-    "Tweak auto-restore, the Cmd+D toggle, notch alerts, and more — all in Settings.": "שנה שחזור אוטומטי, הסתרת חלונות Cmd+D, התראות מגרעת ועוד — הכל בהגדרות.",
+    "Tweak auto-restore, the desktop toggle, notch alerts, and more — all in Settings.": "שנה שחזור אוטומטי, הסתרת חלונות, התראות מגרעת ועוד — הכל בהגדרות.",
     // Slide 7 — Customise
     "Make It Feel Like Home": "גרום לזה להרגיש כמו בית",
     "Pick your accent colour and language in Settings. Small details, big difference.": "בחר את צבע ההדגשה והשפה בהגדרות. פרטים קטנים, שינוי גדול.",
@@ -174,7 +174,7 @@ private let translationDict: [String: String] = [
     "Purr": "Purr (גרגור)",
     "Frog": "Frog (צפרדע)",
     // Notification Events
-    "Desktop toggle (⌘D)": "החלפת מצב שולחן עבודה (⌘D)",
+    "Desktop toggle": "החלפת מצב שולחן עבודה",
     "When all windows are hidden or restored": "כאשר כל החלונות מוסתרים או משוחזרים",
     "Desktop Clean": "שולחן עבודה נקי",
     "All windows hidden": "כל החלונות הוסתרו",
@@ -307,12 +307,9 @@ private let translationDict: [String: String] = [
     "After restoring windows, the app sends **⌘⇧R** to the frontmost application. Open each saved session and tap the **⌘⇧R button** on any app row to exclude that app from receiving the keystroke.": "לאחר שחזור החלונות, האפליקציה שולחת **⌘⇧R** ליישום הקדמי ביותר. פתח כל מפגש שמור והקש על **לחצן ה-⌘⇧R** בשורת כל יישום כדי להחריג יישום זה מקבלת צירוף המקשים.",
     // Experimental
     "Experimental": "ניסיוני",
-    "Desktop Toggle (Cmd+D)": "הצג/הסתר שולחן עבודה (Cmd+D)",
     "Quickly hide/show all windows (disabled for Safari)": "הסתר/הצג במהירות את כל החלונות (מושבת עבור Safari)",
     "Quickly hide/show all windows across your desktop (disabled for Safari browser)": "מסתיר ומציג במהירות את כל החלונות בשולחן העבודה (מושבת עבור דפדפן Safari)",
-    "Restore on Cmd+D unhide": "שחזר בעת ביטול הסתרה עם Cmd+D",
     "Automatically run layout restore when showing windows": "הפעל שחזור אוטומטי של חלונות בעת חזרתם",
-    "Automatically run full layout restore when showing windows using Cmd+D shortcut": "מפעיל שחזור סידור מלא באופן אוטומטי בעת הצגת החלונות מחדש עם קיצור Cmd+D",
     "Focus configured app on unhide": "התמקדות ביישום שהוגדר בעת ביטול הסתרה",
     "Bring the snapshot's frontmost app to focus when unhiding": "הבא לקדמת הבמה את היישום הראשי של הסידור בעת ביטול הסתרה",
     "Bring the snapshot's configured frontmost app back into focus when unhiding desktop": "מחזיר את התמקדות המצלם ליישום הקדמי שהוגדר בסידור בעת ביטול הסתרת שולחן העבודה",
@@ -346,12 +343,12 @@ private let translationDict: [String: String] = [
     "Finder Control granted": "גישה ל-Finder אושרה",
     "Finder Control required": "נדרשת גישה ל-Finder",
     "Finder Control": "שליטה ב-Finder",
-    "Required for ⌘D Desktop Toggle to collapse and restore Finder windows.": "נדרש עבור ⌘D מיתוג שולחן העבודה כדי לכווץ ולשחזר חלונות Finder.",
+    "Required for the Desktop Toggle to collapse and restore Finder windows.": "נדרש עבור מיתוג שולחן העבודה כדי לכווץ ולשחזר חלונות Finder.",
     "Open Automation Settings…": "פתח הגדרות אוטומציה…",
     "Permissions Required": "נדרשות הרשאות",
     "Permissions granted": "הרשאות אושרו",
     "Two quick permissions let RememberMyWindows do its job properly.": "שתי הרשאות קצרות מאפשרות ל-RememberMyWindows לעבוד כראוי.",
-    "Required for ⌘D Desktop Toggle — collapses and restores Finder windows.": "נדרש עבור ⌘D מיתוג שולחן עבודה — כווץ ושחזר חלונות Finder.",
+    "Required for the Desktop Toggle — collapses and restores Finder windows.": "נדרש עבור מיתוג שולחן עבודה — כווץ ושחזר חלונות Finder.",
     "Grant Finder Access…": "אשר גישה ל-Finder…",
     "Grant Accessibility…": "אשר נגישות…",
     "Grant Permissions…": "אשר הרשאות…",
@@ -374,7 +371,7 @@ private let translationDict: [String: String] = [
     "Auto-Restore": "שחזור אוטומטי",
     "Triggers on display connect or app open": "מופעל בחיבור מסך או פתיחת יישום",
     "Desktop Toggle": "הצגת שולחן העבודה",
-    "Cmd+D to hide or show all windows": "Cmd+D להסתרה או הצגה של כל החלונות",
+    "%@ to hide or show all windows": "%@ להסתרה או הצגה של כל החלונות",
     "Notch Alerts": "התראות מגרעת",
     "Pill notifications for layout events": "התראות קפסולה לאירועי סידור חלונות",
     // Menu Bar at a Glance Splash Slide
@@ -394,7 +391,7 @@ private let translationDict: [String: String] = [
 
     // Settings slide cycling descriptions (casual tone)
     "Restores window layouts automatically when you plug/unplug monitors or open apps.": "משחזר סידורי חלונות באופן אוטומטי בעת חיבור/ניתוק מסכים או פתיחת יישומים.",
-    "Hit Cmd+D to hide all windows and see your desktop. Hit it again to bring them back.": "לחץ Cmd+D להסתרת כל החלונות ולראות את שולחן העבודה. לחץ שוב כדי לשחזר אותם.",
+    "Hit %@ to hide all windows and see your desktop. Hit it again to bring them back.": "לחץ %@ להסתרת כל החלונות ולראות את שולחן העבודה. לחץ שוב כדי לשחזר אותם.",
     "A pill-shaped alert slides out of the notch when layouts restore — subtle but satisfying.": "התראה בצורת קפסולה מחליקה מהמגרעת כאשר הסידור משוחזר — עדין אבל מהנה.",
     "Control what shows up in the activity log. 'Necessary' keeps it quiet, 'Verbose' tells you everything.": "שלוט במה שמוצג ביומן הפעילות. 'חיוני' שומר על שקט, 'מפורט' מספר הכל.",
     // Legacy settings descriptions kept for compatibility

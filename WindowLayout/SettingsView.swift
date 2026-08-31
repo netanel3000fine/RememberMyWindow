@@ -35,7 +35,7 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
         switch self {
         case .automation: return "Startup option, logging & language"
         case .restoreSettings: return "Full restore, single app & Quick Key controls"
-        case .experimental: return "Cmd+D Desktop toggle & Cmd+Shift+R triggers"
+        case .experimental: return "Desktop toggle & Cmd+Shift+R triggers"
         case .appearance: return "Theme, Liquid Glass, Notch & Notifications"
         case .permissions: return "Accessibility & Location permissions"
         }
@@ -642,25 +642,38 @@ struct SettingsView: View {
         }
     }
 
-    // MARK: - 3. Experimental Content (Cmd+D Desktop Toggle & Active App Command Trigger)
+    // MARK: - 3. Experimental Content (Desktop Toggle & Active App Command Trigger)
 
     private var experimentalContent: some View {
         VStack(spacing: 18) {
-            // Section 1: Cmd+D Desktop Toggle
-            SettingsSection(title: "Desktop Toggle (Cmd+D)".localized(appLanguage), icon: "keyboard") {
+            // Section 1: Desktop Toggle
+            SettingsSection(title: "Desktop Toggle".localized(appLanguage), icon: "keyboard") {
                 VStack(spacing: 0) {
                     SettingsToggle(
-                        title: "Desktop Toggle (Cmd+D)",
-                        subtitle: "Quickly hide/show all windows across your desktop (disabled for Safari browser)",
+                        title: "Desktop Toggle",
+                        subtitle: "Quickly hide/show all windows across your desktop",
                         icon: "keyboard",
                         isOn: $desktopToggleManager.isEnabled
                     )
 
                     Divider().padding(.horizontal, 12)
 
+                    SettingsShortcutRecorder(
+                        title: "Desktop Toggle shortcut",
+                        subtitle: "Press any combination with at least one modifier",
+                        icon: "command",
+                        hotkey: $desktopToggleManager.hotkey,
+                        onBeginRecording: { desktopToggleManager.suspendForRecording() },
+                        onEndRecording: { desktopToggleManager.resumeAfterRecording() }
+                    )
+                    .disabled(!desktopToggleManager.isEnabled)
+                    .opacity(desktopToggleManager.isEnabled ? 1.0 : 0.45)
+
+                    Divider().padding(.horizontal, 12)
+
                     SettingsToggle(
-                        title: "Restore on Cmd+D unhide",
-                        subtitle: "Automatically run full layout restore when showing windows using Cmd+D shortcut",
+                        title: "Restore layout on unhide",
+                        subtitle: "Automatically run a full layout restore when the windows come back",
                         icon: "arrow.uturn.backward",
                         isOn: $desktopToggleManager.restoreOnUnhide
                     )
@@ -997,7 +1010,7 @@ struct SettingsView: View {
                                 Divider().opacity(0.4).padding(.horizontal, 10)
 
                                 NotificationEventCheckbox(
-                                    title: "Desktop toggle (⌘D)",
+                                    title: "Desktop toggle",
                                     subtitle: "When all windows are hidden or restored",
                                     isOn: Binding(
                                         get: { manager.store.notchNotifyOnDesktopToggle },
@@ -1185,7 +1198,7 @@ struct SettingsView: View {
                                 Divider().opacity(0.4).padding(.horizontal, 10)
 
                                 NotificationEventCheckbox(
-                                    title: "Desktop toggle (⌘D)",
+                                    title: "Desktop toggle",
                                     subtitle: "When all windows are hidden or restored",
                                     isOn: Binding(
                                         get: { manager.store.systemNotifyOnDesktopToggle },
@@ -1410,7 +1423,7 @@ struct SettingsView: View {
                     }
                 }
 
-                Text("Required for ⌘D Desktop Toggle to collapse and restore Finder windows.".localized(appLanguage))
+                Text("Required for the Desktop Toggle to collapse and restore Finder windows.".localized(appLanguage))
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -2669,3 +2682,96 @@ struct SoundPickerButton: View {
     }
 }
 
+/// Inline shortcut recorder. Shows the live binding and, while recording,
+/// captures the next combination that carries at least one modifier.
+///
+/// The Carbon hotkey is released for the duration via `onBeginRecording`,
+/// because a registered hotkey fires ahead of any `NSEvent` monitor — without
+/// that, pressing the current shortcut to re-record it would toggle the desktop
+/// instead of being captured.
+struct SettingsShortcutRecorder: View {
+    let title: String
+    let subtitle: String
+    let icon: String
+    @Binding var hotkey: HotkeyConfig
+    var onBeginRecording: () -> Void
+    var onEndRecording: () -> Void
+
+    @AppStorage("appLanguage") private var appLanguage: AppLanguage = .auto
+    @State private var isRecording = false
+    @State private var monitor: Any?
+    @State private var isHovered = false
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: icon)
+                .foregroundStyle(Color.accentColor)
+                .font(.system(size: 14))
+                .frame(width: 24)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title.localized(appLanguage))
+                    .font(.system(size: 13, weight: .medium))
+                Text((isRecording ? "Press a shortcut, or Escape to cancel" : subtitle).localized(appLanguage))
+                    .font(.system(size: 11))
+                    .foregroundStyle(isRecording ? Color.orange : Color.secondary)
+            }
+
+            Spacer()
+
+            Text(isRecording ? "…" : HotkeyFormatter.glyphs(for: hotkey))
+                .font(.system(size: 12, weight: .medium, design: .rounded))
+                .monospacedDigit()
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3)
+                .background(RoundedRectangle(cornerRadius: 5).fill(Color.primary.opacity(0.08)))
+
+            Button(isRecording ? "Cancel".localized(appLanguage) : "Change…".localized(appLanguage)) {
+                isRecording ? stopRecording() : startRecording()
+            }
+            .font(.caption)
+        }
+        .padding(12)
+        .contentShape(Rectangle())
+        .onHover { isHovered = $0 }
+        .background {
+            if isHovered {
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(Color.primary.opacity(0.05))
+                    .padding(4)
+            }
+        }
+        .onDisappear { stopRecording() }
+    }
+
+    private func startRecording() {
+        guard !isRecording else { return }
+        onBeginRecording()
+        isRecording = true
+
+        monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            if event.keyCode == 53 {            // Escape cancels, binding untouched
+                stopRecording()
+                return nil
+            }
+            let flags = event.modifierFlags
+                .intersection(.deviceIndependentFlagsMask)
+                .intersection([.command, .control, .option, .shift])
+            // A bare key would be unusable as a global shortcut, so ignore it
+            // and keep listening rather than binding something unreachable.
+            guard flags.contains(.command) || flags.contains(.control) || flags.contains(.option) else {
+                return nil
+            }
+            hotkey = HotkeyConfig(keyCode: event.keyCode, rawModifierFlags: flags.rawValue)
+            stopRecording()
+            return nil
+        }
+    }
+
+    private func stopRecording() {
+        if let m = monitor { NSEvent.removeMonitor(m); monitor = nil }
+        guard isRecording else { return }
+        isRecording = false
+        onEndRecording()
+    }
+}

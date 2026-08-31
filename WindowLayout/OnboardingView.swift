@@ -280,7 +280,7 @@ struct OnboardingPermissionsView: View {
                     icon: "folder.fill",
                     iconColor: .blue,
                     title: "Finder Control".localized(language),
-                    description: "Required for ⌘D Desktop Toggle — collapses and restores Finder windows.".localized(language),
+                    description: "Required for the Desktop Toggle — collapses and restores Finder windows.".localized(language),
                     isGranted: hasFinderAutomation,
                     buttonLabel: "Grant Finder Access…".localized(language)
                 ) {
@@ -583,6 +583,7 @@ struct OBSlide: Identifiable {
     let body: String
     let illustration: AnyView
 
+    @MainActor
     static func all(for lang: AppLanguage) -> [OBSlide] {
         [
             // 0: Save layout
@@ -605,10 +606,10 @@ struct OBSlide: Identifiable {
                     headline: "Two Clicks, Two Powers".localized(lang),
                     body: "Left click: restore the current app and open the window list. Right click: restore every app in one shot.".localized(lang),
                     illustration: AnyView(OBIllustrationMenuBar())),
-            // 4: Cmd+D desktop toggle
+            // 4: desktop toggle
             OBSlide(id: 4,
                     headline: "Hide Everything, Instantly".localized(lang),
-                    body: "Press ⌘D and every window vanishes — desktop is clean. Press again and they all come back exactly where they were.".localized(lang),
+                    body: String(format: "Press %@ and every window vanishes — desktop is clean. Press again and they all come back exactly where they were.".localized(lang), HotkeyFormatter.desktopToggleGlyphs),
                     illustration: AnyView(OBIllustrationDesktopToggle())),
             // 5: Cmd+Shift+R post-restore action
             OBSlide(id: 5,
@@ -623,7 +624,7 @@ struct OBSlide: Identifiable {
             // 7: Settings guide
             OBSlide(id: 7,
                     headline: "Fine-Tune How It Works".localized(lang),
-                    body: "Tweak auto-restore, the Cmd+D toggle, notch alerts, and more — all in Settings.".localized(lang),
+                    body: "Tweak auto-restore, the desktop toggle, notch alerts, and more — all in Settings.".localized(lang),
                     illustration: AnyView(OBIllustrationSettingsGuide())),
             // 8: Customise
             OBSlide(id: 8,
@@ -707,7 +708,7 @@ struct OBSlideView: View {
         case 0:
             return "Restores window layouts automatically when you plug/unplug monitors or open apps.".localized(lang)
         case 1:
-            return "Hit Cmd+D to hide all windows and see your desktop. Hit it again to bring them back.".localized(lang)
+            return String(format: "Hit %@ to hide all windows and see your desktop. Hit it again to bring them back.".localized(lang), HotkeyFormatter.desktopToggleGlyphs)
         case 2:
             return "A pill-shaped alert slides out of the notch when layouts restore — subtle but satisfying.".localized(lang)
         case 3:
@@ -1106,7 +1107,7 @@ struct OBIllustrationMenuBar: View {
     }
 }
 
-// MARK: - Desktop Toggle Illustration (Cmd+D) — Enhanced High-Detail Desktop
+// MARK: - Desktop Toggle Illustration — Enhanced High-Detail Desktop
 
 struct OBIllustrationDesktopToggle: View {
     @State private var showWindows = true
@@ -1242,7 +1243,7 @@ struct OBIllustrationDesktopToggle: View {
     }
 
     private func runCycle() {
-        // Step 1: Press ⌘D -> Hide windows
+        // Step 1: press the toggle shortcut -> hide windows
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
             withAnimation(.easeInOut(duration: 0.15)) { keysLit = true }
         }
@@ -1251,7 +1252,7 @@ struct OBIllustrationDesktopToggle: View {
             withAnimation(.spring(response: 0.48, dampingFraction: 0.76)) { showWindows = false }
         }
 
-        // Step 2: Press ⌘D -> Restore windows
+        // Step 2: press it again -> restore windows
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.8) {
             withAnimation(.easeInOut(duration: 0.15)) { keysLit = true }
         }
@@ -1928,7 +1929,7 @@ struct OBIllustrationSettingsGuide: View {
                 icon: "keyboard",
                 color: .purple,
                 title: "Desktop Toggle".localized(appLanguage),
-                subtitle: "Cmd+D to hide or show all windows".localized(appLanguage),
+                subtitle: String(format: "%@ to hide or show all windows".localized(appLanguage), HotkeyFormatter.desktopToggleGlyphs),
                 isActive: activeIndex == 1
             )
 

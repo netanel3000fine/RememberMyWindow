@@ -367,7 +367,7 @@ struct LayoutStore: Codable {
     var systemNotifyOnDisplayChange: Bool = true
     /// Send macOS notification on snapshot and app updates.
     var systemNotifyOnSnapshotUpdate: Bool = true
-    /// Send macOS notification on desktop toggle (⌘D).
+    /// Send macOS notification on desktop toggle.
     var systemNotifyOnDesktopToggle: Bool = false
 
     /// Global default notification sound

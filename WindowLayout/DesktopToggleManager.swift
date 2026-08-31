@@ -6,7 +6,7 @@ import SwiftUI
 final class DesktopToggleManager: ObservableObject {
     static let shared = DesktopToggleManager()
 
-    /// Whether the global Cmd+D shortcut is active.
+    /// Whether the global desktop-toggle shortcut is active.
     @Published var isEnabled: Bool {
         didSet {
             UserDefaults.standard.set(isEnabled, forKey: "enableDesktopToggleShortcut")
@@ -28,10 +28,22 @@ final class DesktopToggleManager: ObservableObject {
         }
     }
 
-    private var eventTap: CFMachPort?
-    private var runLoopSource: CFRunLoopSource?
-    private var retryTimer: Timer?
-    private var hasLoggedMissingPermissions = false
+    /// The global shortcut that toggles the desktop. User-mappable; the binding
+    /// is persisted and re-registered the moment it changes.
+    @Published var hotkey: HotkeyConfig {
+        didSet {
+            guard hotkey != oldValue else { return }
+            hotkey.save(HotkeyKeys.desktopToggle)
+            if isEnabled { start() }
+        }
+    }
+
+    /// True on the first launch after upgrading from a build where the shortcut
+    /// was hardcoded. The binding is left exactly as it was; this only drives a
+    /// one-time notice saying it is now the user's to change.
+    @Published var needsShortcutMigrationNotice: Bool = false
+
+    private let hotkeys = HotkeyManager()
 
     // Toggle state
     private var isDesktopHidden = false
@@ -47,88 +59,81 @@ final class DesktopToggleManager: ObservableObject {
         self.isEnabled = UserDefaults.standard.bool(forKey: "enableDesktopToggleShortcut")
         self.restoreOnUnhide = UserDefaults.standard.bool(forKey: "desktopToggleRestoreOnUnhide")
         self.focusConfiguredAppOnUnhide = UserDefaults.standard.bool(forKey: "desktopToggleFocusConfiguredAppOnUnhide")
+
+        // Choosing the binding, in priority order:
+        //
+        //   1. the user has already chosen one, so use it;
+        //   2. the app has run before, so this is an upgrade from the build
+        //      where the shortcut was hardcoded to command+D. Seed exactly
+        //      that, so the upgrade changes nothing, and raise a one-time
+        //      notice explaining that it is now configurable;
+        //   3. fresh install, so use the default. There is nothing to explain,
+        //      so mark the notice as already seen.
+        let defaults = UserDefaults.standard
+        let stored = defaults.data(forKey: HotkeyKeys.desktopToggle)
+        let hasRunBefore = defaults.bool(forKey: "hasCompletedOnboarding")
+
+        if let stored, let cfg = try? JSONDecoder().decode(HotkeyConfig.self, from: stored) {
+            self.hotkey = cfg
+        } else if hasRunBefore {
+            self.hotkey = .legacyDesktopToggle
+            self.needsShortcutMigrationNotice = !defaults.bool(forKey: HotkeyKeys.acknowledgedShortcutChange)
+        } else {
+            self.hotkey = .defaultDesktopToggle
+            defaults.set(true, forKey: HotkeyKeys.acknowledgedShortcutChange)
+        }
+        // Persist immediately so the binding is stable from here on, whichever
+        // branch produced it.
+        self.hotkey.save(HotkeyKeys.desktopToggle)
+
         if self.isEnabled { start() }
     }
 
-    // MARK: - Tap lifecycle
+    // MARK: - Hotkey lifecycle
+
+    /// Dismiss the one-time upgrade notice. The binding is whatever the user
+    /// left it as; accepting the notice is not itself a change.
+    func acknowledgeShortcutChange() {
+        UserDefaults.standard.set(true, forKey: HotkeyKeys.acknowledgedShortcutChange)
+        needsShortcutMigrationNotice = false
+    }
 
     func start() {
         guard isEnabled else { return }
-        guard eventTap == nil else { return }
-
-        guard AXIsProcessTrusted() else {
-            if !hasLoggedMissingPermissions {
-                WindowManager.shared.log("Failed to enable Cmd+D. Missing Accessibility permissions. Waiting...", type: .system)
-                hasLoggedMissingPermissions = true
-            }
-            scheduleRetry()
-            return
+        let registered = hotkeys.register(hotkey, slot: .desktopToggle) {
+            DesktopToggleManager.shared.toggleDesktop()
         }
-
-        let eventMask = CGEventMask(1 << CGEventType.keyDown.rawValue)
-        eventTap = CGEvent.tapCreate(
-            tap: .cgSessionEventTap,
-            place: .headInsertEventTap,
-            options: .defaultTap,
-            eventsOfInterest: eventMask,
-            callback: { (_, type, event, _) -> Unmanaged<CGEvent>? in
-                guard type == .keyDown else { return Unmanaged.passUnretained(event) }
-
-                let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
-                let flags   = event.flags
-                let isCmd   = flags.contains(.maskCommand)
-                let noMods  = !flags.contains(.maskShift) && !flags.contains(.maskControl) && !flags.contains(.maskAlternate)
-
-                // Cmd+D only
-                guard keyCode == 2, isCmd, noMods else { return Unmanaged.passUnretained(event) }
-
-                // Let Safari keep its native Cmd+D (bookmark shortcut).
-                if NSWorkspace.shared.frontmostApplication?.bundleIdentifier == "com.apple.Safari" {
-                    return Unmanaged.passUnretained(event)
-                }
-
-                DispatchQueue.main.async {
-                    DesktopToggleManager.shared.toggleDesktop()
-                }
-                return nil  // consume the event
-            },
-            userInfo: nil
-        )
-
-        if let tap = eventTap {
-            runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
-            CFRunLoopAddSource(CFRunLoopGetCurrent(), runLoopSource, .commonModes)
-            CGEvent.tapEnable(tap: tap, enable: true)
-            WindowManager.shared.log("Desktop toggle shortcut (Cmd+D) enabled", type: .system)
-            hasLoggedMissingPermissions = false
+        if registered {
+            WindowManager.shared.log(
+                "Desktop toggle shortcut (\(HotkeyFormatter.glyphs(for: hotkey))) enabled",
+                type: .system
+            )
         } else {
-            if !hasLoggedMissingPermissions {
-                WindowManager.shared.log("Failed to enable Cmd+D tap. Retrying...", type: .system)
-                hasLoggedMissingPermissions = true
-            }
-            scheduleRetry()
-        }
-    }
-
-    private func scheduleRetry() {
-        retryTimer?.invalidate()
-        retryTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: false) { [weak self] _ in
-            Task { @MainActor in
-                if self?.isEnabled == true { self?.start() }
-            }
+            // The one thing here the user has to be told about: a shortcut that
+            // silently failed to bind looks identical to a broken feature.
+            WindowManager.shared.log(
+                "Could not register the desktop toggle shortcut \(HotkeyFormatter.glyphs(for: hotkey)). Another application probably holds it. Choose a different one in Settings.",
+                level: .necessary,
+                type: .system
+            )
         }
     }
 
     func stop() {
-        retryTimer?.invalidate()
-        retryTimer = nil
-        guard let tap = eventTap else { return }
-        CGEvent.tapEnable(tap: tap, enable: false)
-        if let source = runLoopSource {
-            CFRunLoopRemoveSource(CFRunLoopGetCurrent(), source, .commonModes)
-        }
-        eventTap = nil
-        runLoopSource = nil
+        hotkeys.unregister(slot: .desktopToggle)
+    }
+
+    /// Releases the binding while the settings recorder is capturing.
+    ///
+    /// A registered hotkey fires ahead of any NSEvent monitor, so without this
+    /// step pressing the current shortcut in order to re-record it would toggle
+    /// the desktop instead of being captured.
+    func suspendForRecording() {
+        hotkeys.unregister(slot: .desktopToggle)
+    }
+
+    func resumeAfterRecording() {
+        if isEnabled { start() }
     }
 
     // MARK: - Toggle
@@ -136,16 +141,19 @@ final class DesktopToggleManager: ObservableObject {
     func toggleDesktop() {
         let frontApp = NSWorkspace.shared.frontmostApplication?.localizedName ?? "Unknown"
         let frontID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "unknown"
-        WindowManager.shared.log("Cmd+D pressed. Focused: \(frontApp) (\(frontID))", level: .verbose)
+        WindowManager.shared.log(
+            "\(HotkeyFormatter.glyphs(for: hotkey)) pressed. Focused: \(frontApp) (\(frontID))",
+            level: .verbose
+        )
 
         if isDesktopHidden {
-            WindowManager.shared.log("Cmd+D action: showing desktop apps", type: .system)
+            WindowManager.shared.log("Desktop toggle: showing desktop apps", type: .system)
             showDesktop()
         } else {
             if isCurrentSpaceFullScreen() {
-                WindowManager.shared.log("Cmd+D action: escaping full-screen app", type: .system)
+                WindowManager.shared.log("Desktop toggle: escaping full-screen app", type: .system)
             } else {
-                WindowManager.shared.log("Cmd+D action: hiding desktop apps", type: .system)
+                WindowManager.shared.log("Desktop toggle: hiding desktop apps", type: .system)
             }
             hideDesktop()
         }
@@ -257,7 +265,7 @@ final class DesktopToggleManager: ObservableObject {
             }
             if let configuredID = candidate?.foregroundBundleID {
                 targetBundleID = configuredID
-                WindowManager.shared.log("Cmd+D unhide: Found configured session front app '\(configuredID)'", level: .verbose)
+                WindowManager.shared.log("Desktop toggle unhide: Found configured session front app '\(configuredID)'", level: .verbose)
             }
         }
         
@@ -273,7 +281,7 @@ final class DesktopToggleManager: ObservableObject {
         
         // Auto-restore layout if enabled.
         if restoreOnUnhide {
-            WindowManager.shared.log("Cmd+D action: triggering layout restore", type: .system)
+            WindowManager.shared.log("Desktop toggle: triggering layout restore", type: .system)
             WindowManager.shared.restoreNow()
         } else {
             WindowManager.shared.deliverNotification(type: .desktopToggle, title: "Windows Restored", subtitle: "All windows unhidden", isCompact: true)
@@ -349,5 +357,15 @@ final class DesktopToggleManager: ObservableObject {
             WindowManager.shared.log("Full-screen detected via CGSSpace (Type: \(spaceType))", level: .verbose)
         }
         return result
+    }
+}
+
+extension HotkeyFormatter {
+    /// The live desktop-toggle binding, for interface copy that names the
+    /// shortcut. Interpolating it means the copy cannot disagree with what is
+    /// actually bound, which is what nine hardcoded strings used to risk.
+    @MainActor
+    static var desktopToggleGlyphs: String {
+        glyphs(for: DesktopToggleManager.shared.hotkey)
     }
 }

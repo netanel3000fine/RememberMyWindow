@@ -34,6 +34,8 @@ swiftc -parse-as-library \
     WindowLayout/WindowPreviewComponents.swift \
     WindowLayout/NotchNotification.swift \
     WindowLayout/DesktopToggleManager.swift \
+    WindowLayout/Hotkey.swift \
+    WindowLayout/ShortcutMigrationView.swift \
     WindowLayout/Localization.swift \
     WindowLayout/OnboardingView.swift \
     WindowLayout/CommandOverlayManager.swift \

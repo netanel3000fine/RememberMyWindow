@@ -7,6 +7,7 @@ struct ContentView: View {
     @AppStorage("themeColor") private var themeColor: ThemeColor = .default
     @AppStorage("appLanguage") private var appLanguage: AppLanguage = .auto
     @AppStorage("hasCompletedOnboarding") private var hasCompletedOnboarding: Bool = false
+    @ObservedObject private var desktopToggleManager = DesktopToggleManager.shared
     @State private var hidePermissionBanner = false
     @State private var columnVisibility = NavigationSplitViewVisibility.all
 
@@ -85,6 +86,17 @@ struct ContentView: View {
         )) {
             OnboardingView {
                 withAnimation { hasCompletedOnboarding = true }
+            }
+        }
+        // Shown only on the first launch after upgrading from a build with a
+        // hardcoded shortcut, and only once onboarding is out of the way so the
+        // two sheets can never compete for the window.
+        .sheet(isPresented: Binding(
+            get: { hasCompletedOnboarding && desktopToggleManager.needsShortcutMigrationNotice },
+            set: { _ in }
+        )) {
+            ShortcutMigrationView(language: appLanguage, manager: desktopToggleManager) {
+                withAnimation { desktopToggleManager.acknowledgeShortcutChange() }
             }
         }
         .toolbar {
