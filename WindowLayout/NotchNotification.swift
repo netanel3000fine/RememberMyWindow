@@ -224,17 +224,27 @@ struct NotchNotificationView: View {
                             .animation(.spring(response: 0.42, dampingFraction: 0.65), value: iconDrop)
                     } else {
                         ZStack {
+                            // Persistent halo. The ripple below fades to zero
+                            // opacity at the top of its cycle, so without this
+                            // the indicator collapses to a bare dot for part of
+                            // every pulse and the notification reads as smaller
+                            // than it is. The halo holds the visual weight; the
+                            // ripple supplies the motion.
+                            Circle()
+                                .fill(accentColor.opacity(0.22))
+                                .frame(width: isCompact ? 18 : 26, height: isCompact ? 18 : 26)
+
                             // Pulsing outer ripple ring
                             Circle()
                                 .stroke(accentColor, lineWidth: 1.5)
-                                .frame(width: isCompact ? 16 : 22, height: isCompact ? 16 : 22)
+                                .frame(width: isCompact ? 18 : 26, height: isCompact ? 18 : 26)
                                 .scaleEffect(dotPulse ? 1.55 : 0.55)
                                 .opacity(dotPulse ? 0.0 : 0.85)
 
                             // Glowing solid center dot
                             Circle()
                                 .fill(accentColor)
-                                .frame(width: isCompact ? 5.5 : 7.5, height: isCompact ? 5.5 : 7.5)
+                                .frame(width: isCompact ? 6 : 9, height: isCompact ? 6 : 9)
                                 .shadow(color: accentColor.opacity(0.85), radius: 4, x: 0, y: 0)
                         }
                         .offset(y: iconDrop ? 0 : -35)
