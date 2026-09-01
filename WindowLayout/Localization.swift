@@ -336,7 +336,6 @@ private let translationDict: [String: String] = [
     "Open Location Settings…": "פתח הגדרות מיקום…",
     "Location Privacy & Safety": "פרטיות ואבטחת מיקום",
     "Turn On": "הפעל",
-    "Your location is used to tag your saved window layouts so you can easily identify where they were saved. All coordinates are processed locally on your Mac and are never uploaded or shared. To protect your privacy, the app only takes 1 location snapshot per session.": "המיקום שלך משמש לתיוג סידורי החלונות השמורים שלך כדי שתוכל לזהות בקלות היכן הם נשמרו. כל הקואורדינטות מעובדות באופן מקומי ב-Mac שלך ולעולם אינן מועלות או משותפות. כדי להגן על פרטיותך, האפליקציה שומרת רק צילום מיקום אחד לכל הפעלה.",
     // Settings Guide Splash Slide
     "Settings Controls": "בקרי הגדרות",
     "Customize triggers, Desktop Toggle (Cmd+D), and Notch notifications in Settings.": "התאם אישית טריגרים, מקש שולחן עבודה (Cmd+D), והתראות מגרעת בהגדרות.",
@@ -492,7 +491,6 @@ private let reverseDict: [String: String] = [
     "הרשאת מיקום נדחתה": "Location access denied",
     "פרטיות ואבטחת מיקום": "Location Privacy & Safety",
     "הפעל": "Turn On",
-    "המיקום שלך משמש לתיוג סידורי החלונות השמורים שלך כדי שתוכל לזהות בקלות היכן הם נשמרו. כל הקואורדינטות מעובדות באופן מקומי ב-Mac שלך ולעולם אינן מועלות או משותפות. כדי להגן על פרטיותך, האפליקציה שומרת רק צילום מיקום אחד לכל הפעלה.": "Your location is used to tag your saved window layouts so you can easily identify where they were saved. All coordinates are processed locally on your Mac and are never uploaded or shared. To protect your privacy, the app only takes 1 location snapshot per session.",
 ]
 
 var currentLocale: Locale {

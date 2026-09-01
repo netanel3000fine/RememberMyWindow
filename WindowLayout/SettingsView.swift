@@ -108,7 +108,7 @@ struct SettingsView: View {
                 // remains false
             }
         } message: {
-            Text("Your location is used to tag your saved window layouts so you can easily identify where they were saved. All coordinates are processed locally on your Mac and are never uploaded or shared. To protect your privacy, the app only takes 1 location snapshot per session.".localized(appLanguage))
+            Text("Your location is used to tag your saved window layouts so you can easily identify where they were saved. To turn the coordinates into a street address, they are sent to Apple once per saved layout. Nothing is sent to the developer.".localized(appLanguage))
         }
     }
 

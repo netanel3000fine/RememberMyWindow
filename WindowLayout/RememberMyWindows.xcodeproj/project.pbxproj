@@ -284,7 +284,7 @@
 				INFOPLIST_KEY_CFBundleDisplayName = "Window Layout";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
 				INFOPLIST_KEY_NSAppleEventsUsageDescription = "Window Layout needs Apple Events access to move windows in other apps.";
-				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "RememberMyWindows needs location access to group and recall your window layouts by location.";
+				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "RememberMyWindows captures your location when saving layouts to help you remember where they were created. The coordinates are sent to Apple to look up the address.";
 				INFOPLIST_KEY_LSUIElement = YES;
 				"INFOPLIST_KEY_CFBundleURLTypes[0].CFBundleURLName" = remembermywindows;
 				"INFOPLIST_KEY_CFBundleURLTypes[0].CFBundleURLSchemes[0]" = remembermywindows;
@@ -315,7 +315,7 @@
 				INFOPLIST_KEY_CFBundleDisplayName = "Window Layout";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
 				INFOPLIST_KEY_NSAppleEventsUsageDescription = "Window Layout needs Apple Events access to move windows in other apps.";
-				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "RememberMyWindows needs location access to group and recall your window layouts by location.";
+				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "RememberMyWindows captures your location when saving layouts to help you remember where they were created. The coordinates are sent to Apple to look up the address.";
 				INFOPLIST_KEY_LSUIElement = YES;
 				"INFOPLIST_KEY_CFBundleURLTypes[0].CFBundleURLName" = remembermywindows;
 				"INFOPLIST_KEY_CFBundleURLTypes[0].CFBundleURLSchemes[0]" = remembermywindows;

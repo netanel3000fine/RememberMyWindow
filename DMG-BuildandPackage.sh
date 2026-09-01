@@ -68,7 +68,7 @@ cat <<EOF > "${APP_DIR}/Contents/Info.plist"
     <key>NSAccessibilityUsageDescription</key>
     <string>RememberMyWindows needs Accessibility access to restore window positions in other apps.</string>
     <key>NSLocationWhenInUseUsageDescription</key>
-    <string>RememberMyWindows captures your location when saving layouts to help you remember where they were created.</string>
+    <string>RememberMyWindows captures your location when saving layouts to help you remember where they were created. The coordinates are sent to Apple to look up the address.</string>
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
     <key>CFBundleURLTypes</key>
