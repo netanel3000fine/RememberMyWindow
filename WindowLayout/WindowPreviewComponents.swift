@@ -298,10 +298,238 @@ final class AppIconColorCache {
     }
 }
 
+// MARK: - Main Window Icon Interaction
+
+enum MainWindowSymbolEffect {
+    case wiggle
+    case wiggleByLayer
+    case rotate
+    case rotateCounterClockwise
+    case flip
+    case breathe
+    case breathePlain
+    case pulse
+    case pulseByLayer
+    case variableColor
+    case variableColorCumulative
+}
+
+/// The hover state of the control that owns a symbol. Keeping this in the
+/// environment means a symbol can animate when the pointer is over its whole
+/// Button, Label, or row instead of only when it is over the glyph itself.
+struct MainWindowIconHoverRegion {
+    var isDefined = false
+    var isHovered = false
+}
+
+private struct MainWindowIconHoverRegionKey: EnvironmentKey {
+    static let defaultValue = MainWindowIconHoverRegion()
+}
+
+extension EnvironmentValues {
+    var mainWindowIconHoverRegion: MainWindowIconHoverRegion {
+        get { self[MainWindowIconHoverRegionKey.self] }
+        set { self[MainWindowIconHoverRegionKey.self] = newValue }
+    }
+}
+
+private struct MainWindowIconHoverRegionModifier: ViewModifier {
+    @Environment(\.controlActiveState) private var controlActiveState
+    @State private var isHovered = false
+
+    func body(content: Content) -> some View {
+        content
+            .contentShape(Rectangle())
+            .onHover { hovering in
+                guard controlActiveState == .key || !hovering else { return }
+                isHovered = hovering
+            }
+            .onChange(of: controlActiveState) { _, newState in
+                if newState != .key {
+                    isHovered = false
+                }
+            }
+            .environment(
+                \.mainWindowIconHoverRegion,
+                MainWindowIconHoverRegion(isDefined: true, isHovered: isHovered)
+            )
+    }
+}
+
+extension View {
+    /// Makes the entire view the hover target for descendant main-window
+    /// symbols. Apply this to the owning Button, Label, or row.
+    func mainWindowSymbolHoverRegion() -> some View {
+        modifier(MainWindowIconHoverRegionModifier())
+    }
+}
+
+/// Applies a semantic native SF Symbol effect to an icon in the main window.
+/// The effect plays once when the pointer enters or the icon is clicked,
+/// without changing the action owned by the surrounding control or row.
+struct MainWindowSymbolAnimation: ViewModifier {
+    let effect: MainWindowSymbolEffect
+    let capturesClicks: Bool
+    @Environment(\.controlActiveState) private var controlActiveState
+    @Environment(\.mainWindowIconHoverRegion) private var hoverRegion
+    @State private var isHovered = false
+    @State private var animationTrigger = 0
+    @State private var isFlipping = false
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        let animated = interactiveContent(animatedContent(content))
+        if hoverRegion.isDefined {
+            animated
+                .onChange(of: hoverRegion.isHovered) { _, hovering in
+                    if hovering && controlActiveState == .key {
+                        triggerAnimation()
+                    }
+                }
+        } else {
+            animated
+                .onHover { hovering in
+                    guard controlActiveState == .key || !hovering else { return }
+                    if hovering && !isHovered {
+                        triggerAnimation()
+                    }
+                    isHovered = hovering
+                }
+                .onChange(of: controlActiveState) { _, newState in
+                    if newState != .key {
+                        isHovered = false
+                    }
+                }
+        }
+    }
+
+    @ViewBuilder
+    private func interactiveContent<V: View>(_ content: V) -> some View {
+        if capturesClicks {
+            content.simultaneousGesture(
+                TapGesture().onEnded {
+                    triggerAnimation()
+                },
+                including: .gesture
+            )
+        } else {
+            content
+        }
+    }
+
+    @ViewBuilder
+    private func animatedContent(_ content: Content) -> some View {
+        if #available(macOS 15.0, *) {
+            switch effect {
+            case .wiggle:
+                content.symbolEffect(.wiggle, options: .speed(0.85), value: animationTrigger)
+            case .wiggleByLayer:
+                content.symbolEffect(.wiggle.byLayer, options: .speed(0.9), value: animationTrigger)
+            case .rotate:
+                content.symbolEffect(.rotate.clockwise, options: .speed(0.75), value: animationTrigger)
+            case .rotateCounterClockwise:
+                content.symbolEffect(.rotate.counterClockwise, options: .speed(0.75), value: animationTrigger)
+            case .flip:
+                flipContent(content)
+            case .breathe:
+                content.symbolEffect(.breathe.pulse, options: .speed(0.8), value: animationTrigger)
+            case .breathePlain:
+                content.symbolEffect(.breathe.plain, options: .speed(0.8), value: animationTrigger)
+            case .pulse:
+                pulseContent(content)
+            case .pulseByLayer:
+                pulseByLayerContent(content)
+            case .variableColor:
+                variableColorContent(content)
+            case .variableColorCumulative:
+                variableColorCumulativeContent(content)
+            }
+        } else {
+            fallbackContent(content)
+        }
+    }
+
+    @ViewBuilder
+    private func fallbackContent(_ content: Content) -> some View {
+        switch effect {
+        case .pulse, .wiggle, .rotate, .rotateCounterClockwise, .breathe, .breathePlain:
+            pulseContent(content)
+        case .flip:
+            flipContent(content)
+        case .pulseByLayer, .wiggleByLayer:
+            pulseByLayerContent(content)
+        case .variableColor:
+            variableColorContent(content)
+        case .variableColorCumulative:
+            variableColorCumulativeContent(content)
+        }
+    }
+
+    private func pulseContent(_ content: Content) -> some View {
+        content
+            .symbolEffect(.pulse, options: .speed(0.9), value: animationTrigger)
+    }
+
+    private func triggerAnimation() {
+        switch effect {
+        case .flip:
+            isFlipping = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.36) {
+                isFlipping = false
+            }
+        default:
+            animationTrigger &+= 1
+        }
+    }
+
+    private func flipContent(_ content: Content) -> some View {
+        content
+            .rotation3DEffect(
+                .degrees(isFlipping ? 180 : 0),
+                axis: (x: 0, y: 1, z: 0),
+                perspective: 0.65
+            )
+            .animation(.smooth(duration: 0.34), value: isFlipping)
+    }
+
+    private func pulseByLayerContent(_ content: Content) -> some View {
+        content
+            .symbolEffect(.pulse.byLayer, options: .speed(0.95), value: animationTrigger)
+    }
+
+    private func variableColorContent(_ content: Content) -> some View {
+        content
+            .symbolEffect(
+                .variableColor.iterative.reversing,
+                options: .speed(0.85),
+                value: animationTrigger
+            )
+    }
+
+    private func variableColorCumulativeContent(_ content: Content) -> some View {
+        content
+            .symbolEffect(
+                .variableColor.cumulative,
+                options: .speed(0.9),
+                value: animationTrigger
+            )
+    }
+}
+
+extension View {
+    func mainWindowSymbolAnimation(
+        _ effect: MainWindowSymbolEffect = .pulse,
+        capturesClicks: Bool = true
+    ) -> some View {
+        modifier(MainWindowSymbolAnimation(effect: effect, capturesClicks: capturesClicks))
+    }
+}
+
 // MARK: - Layout Preview View (for detail view)
 
 struct AppIconView: View {
     let bundleID: String
+
     var body: some View {
         let image: NSImage? = AppIconColorCache.appIcon(for: bundleID)
         
@@ -323,6 +551,8 @@ struct LayoutPreviewView: View {
     let tint: Color
     var enable3DHover: Bool = false
     var onSelectRecord: ((UUID) -> Void)? = nil
+    
+    @Environment(\.controlActiveState) private var controlActiveState
     
     @State private var isHovered: Bool = false
     @State private var hoveredRecordID: UUID? = nil
@@ -364,7 +594,7 @@ struct LayoutPreviewView: View {
                 }
                 
                 // Windows
-                ForEach(snapshot.records) { record in
+                ForEach(snapshot.previewRecords) { record in
                     classicWindowView(
                         record: record,
                         boundingBox: boundingBox,
@@ -482,7 +712,8 @@ struct LayoutPreviewView: View {
             let centerOffsetX = max(0, (geo.size.width - layoutW) / 2)
             let centerOffsetY = max(0, (geo.size.height - layoutH) / 2)
             
-            let totalRecords = max(1, snapshot.records.count)
+            let previewRecords = snapshot.previewRecords
+            let totalRecords = max(1, previewRecords.count)
             let isSingleScreen = getScreenFrames().count == 1
             let cursorX = Double(cursorHorizontalPosition)
 
@@ -552,12 +783,12 @@ struct LayoutPreviewView: View {
             }()
 
             // Sort records strictly by z-order rank: index 0 is front-most, last is background
-            let frontToBackRecords = snapshot.records.sorted { a, b in
+            let frontToBackRecords = previewRecords.sorted { a, b in
                 let za = a.zIndex ?? 0
                 let zb = b.zIndex ?? 0
                 if za != zb { return za > zb }
-                let idxA = snapshot.records.firstIndex(where: { $0.id == a.id }) ?? 0
-                let idxB = snapshot.records.firstIndex(where: { $0.id == b.id }) ?? 0
+                let idxA = previewRecords.firstIndex(where: { $0.id == a.id }) ?? 0
+                let idxB = previewRecords.firstIndex(where: { $0.id == b.id }) ?? 0
                 return idxA > idxB
             }
 
@@ -660,7 +891,7 @@ struct LayoutPreviewView: View {
                 }
                 
                 // Windows (Single Unified Glass Tablets with dynamic forward layer spacing)
-                ForEach(snapshot.records) { record in
+                ForEach(previewRecords) { record in
                     WindowPreviewTileView(
                         record: record,
                         snapshot: snapshot,
@@ -700,6 +931,7 @@ struct LayoutPreviewView: View {
         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         .overlay {
             PreviewCursorTracker { position in
+                guard controlActiveState == .key else { return }
                 // Hand off to cursor only after intro animation completes
                 guard !isPlayingIntro else { return }
                 let prev = Double(cursorHorizontalPosition)
@@ -713,6 +945,7 @@ struct LayoutPreviewView: View {
             }
         }
         .onHover { hovering in
+            guard controlActiveState == .key || !hovering else { return }
             withAnimation(.spring(response: 0.45, dampingFraction: 0.72)) {
                 isHovered = hovering
                 if !hovering {
@@ -724,13 +957,24 @@ struct LayoutPreviewView: View {
                 }
             }
         }
+        .onChange(of: controlActiveState) { _, newState in
+            if newState != .key {
+                introTask?.cancel()
+                isPlayingIntro = false
+                withAnimation(.spring(response: 0.45, dampingFraction: 0.72)) {
+                    isHovered = false
+                    hoveredRecordID = nil
+                    cursorHorizontalPosition = 0.5
+                }
+            }
+        }
         .onAppear {
-            if enable3DHover {
+            if enable3DHover && controlActiveState == .key {
                 playIntroAnimation()
             }
         }
         .onChange(of: enable3DHover) { _, newValue in
-            if newValue {
+            if newValue && controlActiveState == .key {
                 playIntroAnimation()
             }
         }
@@ -744,7 +988,7 @@ struct LayoutPreviewView: View {
         introTask = Task { @MainActor in
             // 1. Settle delay: let the panel fully slide in before animating
             try? await Task.sleep(nanoseconds: 150_000_000)
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled, controlActiveState == .key else { return }
 
             isPlayingIntro = true
             // Activate 3D mode for the teaser
@@ -757,21 +1001,21 @@ struct LayoutPreviewView: View {
                 cursorHorizontalPosition = 1.0
             }
             try? await Task.sleep(nanoseconds: 510_000_000)
-            guard !Task.isCancelled else { isPlayingIntro = false; return }
+            guard !Task.isCancelled, controlActiveState == .key else { isPlayingIntro = false; return }
 
             // 3. Sweep through center all the way to far left (1.0s — crosses center naturally)
             withAnimation(.easeInOut(duration: 1.0)) {
                 cursorHorizontalPosition = 0.0
             }
             try? await Task.sleep(nanoseconds: 1_020_000_000)
-            guard !Task.isCancelled else { isPlayingIntro = false; return }
+            guard !Task.isCancelled, controlActiveState == .key else { isPlayingIntro = false; return }
 
             // 4. Return back to center (0.5s)
             withAnimation(.easeInOut(duration: 0.5)) {
                 cursorHorizontalPosition = 0.5
             }
             try? await Task.sleep(nanoseconds: 520_000_000)
-            guard !Task.isCancelled else { isPlayingIntro = false; return }
+            guard !Task.isCancelled, controlActiveState == .key else { isPlayingIntro = false; return }
 
             // 5. Collapse back to flat 2D
             withAnimation(.spring(response: 0.45, dampingFraction: 0.72)) {
@@ -882,11 +1126,33 @@ private final class PreviewCursorTrackingNSView: NSView {
         super.updateTrackingAreas()
     }
 
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        NotificationCenter.default.removeObserver(self, name: NSWindow.didResignKeyNotification, object: nil)
+        if let window = self.window {
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(windowDidResignKey),
+                name: NSWindow.didResignKeyNotification,
+                object: window
+            )
+        }
+    }
+
+    @objc private func windowDidResignKey() {
+        lastReportedX = 0.5
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+    }
+
     override func mouseEntered(with event: NSEvent) { report(event) }
     override func mouseMoved(with event: NSEvent) { report(event) }
 
     private func report(_ event: NSEvent) {
         guard bounds.width > 0 else { return }
+        guard let window = self.window, window.isKeyWindow else { return }
         let point = convert(event.locationInWindow, from: nil)
         let raw = min(1, max(0, point.x / bounds.width))
         // Dead-band threshold: filter out micro hand tremors (0.015)
@@ -926,6 +1192,7 @@ private struct WindowPreviewTileView: View {
     let peelData: WindowPeelData
     let onSelectRecord: ((UUID) -> Void)?
     
+    @Environment(\.controlActiveState) private var controlActiveState
     @State private var dwellTask: Task<Void, Never>? = nil
     
     private var isSelected: Bool { record.id == selectedRecordID }
@@ -934,12 +1201,13 @@ private struct WindowPreviewTileView: View {
     private var isPeeling: Bool { is3D && peelData.isPeeling }
     
     private var rank: Int {
-        let sorted = snapshot.records.sorted { a, b in
+        let previewRecords = snapshot.previewRecords
+        let sorted = previewRecords.sorted { a, b in
             let za = a.zIndex ?? 0
             let zb = b.zIndex ?? 0
             if za != zb { return za > zb }
-            let idxA = snapshot.records.firstIndex(where: { $0.id == a.id }) ?? 0
-            let idxB = snapshot.records.firstIndex(where: { $0.id == b.id }) ?? 0
+            let idxA = previewRecords.firstIndex(where: { $0.id == a.id }) ?? 0
+            let idxB = previewRecords.firstIndex(where: { $0.id == b.id }) ?? 0
             return idxA > idxB
         }
         return sorted.firstIndex(where: { $0.id == record.id }) ?? 0
@@ -1047,13 +1315,13 @@ private struct WindowPreviewTileView: View {
                     }
                     return min(w * 0.7, 32)
                 }()
-                
+
                 VStack(spacing: 3) {
                     AppIconView(bundleID: record.windowID.appBundleID)
                         .frame(width: iconSize, height: iconSize)
                         .shadow(color: .black.opacity(0.35), radius: 3)
                         .opacity(isFocused || isSelected || isPeeling ? 1.0 : (hasHoverFocus ? 0.75 : 0.95))
-                    
+
                     if (w > 44 && h > 26) || isFocused || isSelected || isPeeling {
                         Text(record.windowID.appName?.prefix(14) ?? "")
                             .font(.system(size: is3D ? max(9, 11 * scale) : max(8, 10 * scale), weight: (isFocused || isSelected || isPeeling) ? .bold : .semibold, design: .rounded))
@@ -1083,8 +1351,18 @@ private struct WindowPreviewTileView: View {
         .contentShape(Rectangle()) // Strictly anchored to base footprint
         .allowsHitTesting(!is3D || peelData.opacity > 0.3)
         .onHover { hovering in
-            guard is3D else { return }
+            guard is3D && controlActiveState == .key else {
+                if !hovering {
+                    handleHover(false)
+                }
+                return
+            }
             handleHover(hovering)
+        }
+        .onChange(of: controlActiveState) { _, newState in
+            if newState != .key {
+                dwellTask?.cancel()
+            }
         }
         .onTapGesture {
             onSelectRecord?(record.id)
@@ -1380,9 +1658,10 @@ struct MenuWindowListView: View {
                 }
             } else {
                 let frontmostBundleID = activeBundleID ?? NSWorkspace.shared.frontmostApplication?.bundleIdentifier
-                let activeRecords = snapshot.records.filter { $0.windowID.appBundleID == frontmostBundleID }
-                let otherRecords = limitToActiveApp ? [] : snapshot.records.filter { $0.windowID.appBundleID != frontmostBundleID }
-                let displayedActiveRecords = (!activeRecords.isEmpty || !limitToActiveApp) ? activeRecords : [snapshot.records.first].compactMap { $0 }
+                let baseRecords = snapshot.previewRecords
+                let activeRecords = baseRecords.filter { $0.windowID.appBundleID == frontmostBundleID }
+                let otherRecords = limitToActiveApp ? [] : baseRecords.filter { $0.windowID.appBundleID != frontmostBundleID }
+                let displayedActiveRecords = (!activeRecords.isEmpty || !limitToActiveApp) ? activeRecords : [baseRecords.first].compactMap { $0 }
 
                 if !displayedActiveRecords.isEmpty {
                     ForEach(Array(displayedActiveRecords.enumerated()), id: \.element.id) { index, record in
@@ -1448,6 +1727,7 @@ struct MenuWindowListView: View {
                     
                     if isForeground {
                         Image(systemName: "square.3.layers.3d.top.filled")
+                            .mainWindowSymbolAnimation(.breathePlain, capturesClicks: false)
                             .font(.system(size: 8))
                             .foregroundStyle(isHovered ? Color.white : themeColor.color(seed: 5))
                     }
@@ -1532,6 +1812,7 @@ struct MenuWindowListView: View {
         )
         .padding(.horizontal, 8)
         .contentShape(Rectangle())
+        .mainWindowSymbolHoverRegion()
         .onHover { hovering in
             hoveredRecordID = hovering ? record.id : nil
         }
@@ -1557,11 +1838,12 @@ struct AutoSavePreviewCardView: View {
             Button(action: onRestore) {
                 HStack(spacing: 6) {
                     Image(systemName: "clock.arrow.circlepath")
+                        .mainWindowSymbolAnimation(.wiggleByLayer, capturesClicks: false)
                         .font(.system(size: 11, weight: .semibold))
                     Text("Restore this layout".localized(language))
                         .font(.system(size: 11, weight: .medium))
                     Spacer(minLength: 8)
-                    Text(snapshot.records.count == 1 ? "1 window".localized(language) : "\(snapshot.records.count) \("windows".localized(language))")
+                    Text(snapshot.previewRecords.count == 1 ? "1 window".localized(language) : "\(snapshot.previewRecords.count) \("windows".localized(language))")
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                 }
@@ -1569,6 +1851,7 @@ struct AutoSavePreviewCardView: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .mainWindowSymbolHoverRegion()
             .foregroundStyle(tint)
             .accessibilityLabel(Text("Restore this layout".localized(language)))
 

@@ -162,7 +162,7 @@ struct ContentView: View {
 
                         LayoutPreviewView(snapshot: snapshot, selectedRecordID: nil, tint: themeColor.color(seed: 2))
                             .frame(height: 160)
-                            .animation(.spring(response: 0.4, dampingFraction: 0.8), value: snapshot.records.count)
+                            .animation(.spring(response: 0.4, dampingFraction: 0.8), value: snapshot.previewRecords.count)
                     }
                     .padding(16)
                     // Slides out to the left (-x) when switching to Auto Layout;
@@ -195,6 +195,7 @@ struct ContentView: View {
                 } label: {
                     HStack(spacing: 4) {
                         Image(systemName: "square.and.arrow.down")
+                            .mainWindowSymbolAnimation(.wiggle, capturesClicks: false)
                         Text((manager.willUpdateSession ? "Update Layout" : "Save Layout").localized(appLanguage))
                     }
                 }
@@ -215,6 +216,7 @@ struct ContentView: View {
                     }
                     return false
                 }())
+                .mainWindowSymbolHoverRegion()
 
                 Button {
                     if let key = manager.selectedSnapshotKey, key != WindowManager.liveKey {
@@ -225,6 +227,7 @@ struct ContentView: View {
                 } label: {
                     HStack(spacing: 4) {
                         Image(systemName: "arrow.uturn.backward.circle")
+                            .mainWindowSymbolAnimation(.flip, capturesClicks: false)
                         Text("Restore".localized(appLanguage))
                     }
                 }
@@ -237,6 +240,7 @@ struct ContentView: View {
                     }
                     return false
                 }())
+                .mainWindowSymbolHoverRegion()
             }
 
         }
@@ -247,8 +251,10 @@ struct ContentView: View {
             openSettings()
         } label: {
             Image(systemName: "gearshape")
+                .mainWindowSymbolAnimation(.rotate, capturesClicks: false)
         }
         .buttonBorderShape(.circle)
+        .mainWindowSymbolHoverRegion()
         .help("Settings".localized(appLanguage))
     }
 
@@ -261,29 +267,47 @@ struct ContentView: View {
                 }
             }
         )) {
-            Text("\(Image(systemName: "clock.arrow.circlepath")) \("Auto Layout".localized(appLanguage))").tag(0)
-            Text("\(Image(systemName: "folder")) \("Saved Sessions".localized(appLanguage))").tag(1)
+            Label {
+                Text("Auto Layout".localized(appLanguage))
+            } icon: {
+                Image(systemName: "clock.arrow.circlepath")
+                    .mainWindowSymbolAnimation(.wiggleByLayer, capturesClicks: false)
+            }
+                .labelStyle(.titleAndIcon)
+                .tag(0)
+            Label {
+                Text("Saved Sessions".localized(appLanguage))
+            } icon: {
+                Image(systemName: "folder")
+                    .mainWindowSymbolAnimation(.wiggleByLayer, capturesClicks: false)
+            }
+                .labelStyle(.titleAndIcon)
+                .tag(1)
         }
         .pickerStyle(.segmented)
-        .labelsHidden()
-        .fixedSize()
-        .overlay(HoverBlockerView())
+        .fixedSize(horizontal: true, vertical: false)
+        .mainWindowSymbolHoverRegion()
+        .accessibilityLabel(Text("Layout mode".localized(appLanguage)))
         .help("Switch between Auto Layout mode and Saved Sessions mode".localized(appLanguage))
     }
 
     private var permissionBanner: some View {
         HStack(spacing: 12) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .foregroundStyle(.orange)
-                .font(.title3)
-            
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Accessibility Permission Required".localized(appLanguage))
-                    .font(.headline)
-                Text("To track and restore windows from other apps, please enable RememberMyWindows in System Settings. If already ON, toggle it OFF and ON to refresh macOS cache.".localized(appLanguage))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+            HStack(spacing: 12) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .mainWindowSymbolAnimation(.breathe)
+                    .foregroundStyle(.orange)
+                    .font(.title3)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Accessibility Permission Required".localized(appLanguage))
+                        .font(.headline)
+                    Text("To track and restore windows from other apps, please enable RememberMyWindows in System Settings. If already ON, toggle it OFF and ON to refresh macOS cache.".localized(appLanguage))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
+            .mainWindowSymbolHoverRegion()
             
             Spacer()
 
@@ -305,10 +329,12 @@ struct ContentView: View {
                 }
             } label: {
                 Image(systemName: "xmark")
+                    .mainWindowSymbolAnimation(.wiggle, capturesClicks: false)
                     .font(.caption.bold())
             }
             .buttonStyle(.plain)
             .foregroundStyle(.tertiary)
+            .mainWindowSymbolHoverRegion()
         }
         .padding(12)
         .background {
@@ -374,35 +400,4 @@ private struct MainToolbarOrderFix: NSViewRepresentable {
         toolbar.removeItem(at: settingsIndex)
         toolbar.insertItem(withItemIdentifier: settingsIdentifier, at: sidebarIndex)
     }
-}
-
-// MARK: - HoverBlockerView (from iPhonePhotosBackup)
-
-/// A transparent NSView overlay that absorbs mouse-entered/moved/exited events
-/// so the underlying NSSegmentedControl never sees hover and therefore never
-/// draws its hover-highlight state. Left-click events are NOT consumed —
-/// they fall through to the control below via hitTest returning nil.
-class HoverBlockingNSView: NSView {
-    override func updateTrackingAreas() {
-        super.updateTrackingAreas()
-        for area in trackingAreas { removeTrackingArea(area) }
-        addTrackingArea(NSTrackingArea(
-            rect: bounds,
-            options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways],
-            owner: self,
-            userInfo: nil
-        ))
-    }
-
-    override func mouseEntered(with event: NSEvent) { /* swallow */ }
-    override func mouseMoved(with event: NSEvent)   { /* swallow */ }
-    override func mouseExited(with event: NSEvent)  { /* swallow */ }
-
-    // Pass clicks through so the Picker still works.
-    override func hitTest(_ point: NSPoint) -> NSView? { nil }
-}
-
-struct HoverBlockerView: NSViewRepresentable {
-    func makeNSView(context: Context) -> HoverBlockingNSView { HoverBlockingNSView() }
-    func updateNSView(_ nsView: HoverBlockingNSView, context: Context) { }
 }

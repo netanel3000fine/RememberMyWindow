@@ -47,6 +47,7 @@ struct LayoutsView: View {
     var emptyState: some View {
         VStack(spacing: 16) {
             Image(systemName: "macwindow.on.rectangle")
+                .mainWindowSymbolAnimation(.wiggleByLayer)
                 .font(.system(size: 52))
                 .foregroundStyle(.quaternary)
             Text("No layouts saved yet".localized(appLanguage))
@@ -58,6 +59,7 @@ struct LayoutsView: View {
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 360)
         }
+        .mainWindowSymbolHoverRegion()
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
@@ -129,6 +131,7 @@ struct SnapshotListView: View {
                                     isHovered: hoveredKey == live.key
                                 )
                                 .contentShape(Rectangle())
+                                .mainWindowSymbolHoverRegion()
                                 .onHover { isHovered in
                                     if isHovered { hoveredKey = live.key }
                                     else if hoveredKey == live.key { hoveredKey = nil }
@@ -166,6 +169,7 @@ struct SnapshotListView: View {
                         } label: {
                             HStack(spacing: 4) {
                                 Image(systemName: "chevron.right")
+                                    .mainWindowSymbolAnimation(.wiggle, capturesClicks: false)
                                     .font(.system(size: 9, weight: .bold))
                                     .rotationEffect(.degrees(sessionsExpanded ? 90 : 0))
                                 Text("SAVED SESSIONS".localized(appLanguage))
@@ -182,6 +186,7 @@ struct SnapshotListView: View {
                         }
                         .buttonStyle(.plain)
                         .padding(.leading, 8)
+                        .mainWindowSymbolHoverRegion()
 
                         if sessionsExpanded {
                             if savedSnapshots.isEmpty {
@@ -201,6 +206,7 @@ struct SnapshotListView: View {
                                             isHovered: hoveredKey == item.key
                                         )
                                         .contentShape(Rectangle())
+                                        .mainWindowSymbolHoverRegion()
                                         .onHover { isHovered in
                                             if isHovered { hoveredKey = item.key }
                                             else if hoveredKey == item.key { hoveredKey = nil }
@@ -286,6 +292,7 @@ struct SnapshotListView: View {
         let systemIcon = displayCount > 1 ? "display.2" : "display"
         return HStack(spacing: 12) {
             Image(systemName: systemIcon)
+                .mainWindowSymbolAnimation(.wiggleByLayer, capturesClicks: false)
                 .font(.system(size: 18))
                 .foregroundStyle(isApplicable ? themeColor.color(seed: 0) : .secondary)
                 .frame(width: 24)
@@ -313,7 +320,7 @@ struct SnapshotListView: View {
                         .lineLimit(1)
                 }
 
-                Text("\(snapshot.records.count) windows · \(snapshot.updatedAt.formatted(.relative(presentation: .named).locale(currentLocale)))")
+                Text("\(snapshot.previewRecords.count) windows · \(snapshot.updatedAt.formatted(.relative(presentation: .named).locale(currentLocale)))")
                     .font(.footnote)
                     .foregroundStyle(.tertiary)
                     .lineLimit(1)
@@ -365,7 +372,7 @@ struct SnapshotDetailView: View {
                         }
                         
                         HStack(spacing: 24) {
-                            statPill(label: "Windows".localized(appLanguage), value: "\(snapshot.records.count)")
+                            statPill(label: "Windows".localized(appLanguage), value: "\(snapshot.previewRecords.count)")
                             statPill(label: "Created".localized(appLanguage), value: snapshot.createdAt.formatted(Date.FormatStyle(date: .abbreviated, time: .omitted, locale: currentLocale)))
                             statPill(label: "Updated".localized(appLanguage), value: snapshot.updatedAt.formatted(.relative(presentation: .named).locale(currentLocale)))
                         }
@@ -515,6 +522,7 @@ private struct SavedSessionDisplayWarnings: View {
 
                 HStack(spacing: 10) {
                     Image(systemName: warning.systemImage)
+                        .mainWindowSymbolAnimation(.breathe)
                         .font(.system(size: 15, weight: .medium))
                         .foregroundStyle(Color.primary.opacity(0.72))
                         .frame(width: 22)
@@ -537,6 +545,7 @@ private struct SavedSessionDisplayWarnings: View {
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
+                .mainWindowSymbolHoverRegion()
                 .accessibilityElement(children: .combine)
             }
         }
@@ -596,6 +605,7 @@ struct WindowRowContainer: View {
                     if isFull {
                         HStack(spacing: 3) {
                             Image(systemName: "arrow.up.left.and.arrow.down.right")
+                                .mainWindowSymbolAnimation(.wiggle)
                                 .font(.system(size: 8, weight: .bold))
                             Text("Full Screen".localized(appLanguage))
                                 .font(.system(size: 10, weight: .bold))
@@ -608,6 +618,7 @@ struct WindowRowContainer: View {
                     }
                     if isForeground {
                         Image(systemName: "square.3.layers.3d.top.filled")
+                            .mainWindowSymbolAnimation(.breathePlain)
                             .font(.system(size: 10))
                             .foregroundStyle(themeColor.color(seed: 5))
                             .help("This app will be brought to the front upon restore")
@@ -676,6 +687,7 @@ struct WindowRowContainer: View {
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .stroke(isRowHovered ? themeColor.color(seed: 6).opacity(0.35) : Color.clear, lineWidth: 1.5)
         }
+        .mainWindowSymbolHoverRegion()
         .onHover { hovering in
             withAnimation(.easeOut(duration: 0.15)) {
                 isRowHovered = hovering
@@ -731,10 +743,16 @@ struct LocationBlock: View {
             .fixedSize()
             
             VStack(alignment: .leading, spacing: 3) {
-                Label((isUpdated ? "Saved&Updated At" : "Saved At").localized(appLanguage), systemImage: "location.fill")
+                Label {
+                    Text((isUpdated ? "Saved&Updated At" : "Saved At").localized(appLanguage))
+                } icon: {
+                    Image(systemName: "location.fill")
+                        .mainWindowSymbolAnimation(.breathe, capturesClicks: false)
+                }
                     .font(.system(size: 9, weight: .black))
                     .foregroundStyle(.secondary)
                     .opacity(0.8)
+                    .mainWindowSymbolHoverRegion()
                 
                 if isEditing {
                     TextField("Location Name", text: $editedAddress, onCommit: {
@@ -792,11 +810,13 @@ struct DeleteSessionAppButton: View {
                 .fill(isHovered ? Color.red.opacity(0.15) : Color.clear)
                 .frame(width: 26, height: 26)
             Image(systemName: "trash")
+                .mainWindowSymbolAnimation(.wiggleByLayer, capturesClicks: false)
                 .font(.system(size: 13, weight: .medium))
                 .foregroundStyle(isHovered ? Color.red : Color.red.opacity(0.7))
         }
         .frame(width: 26, height: 26)
         .contentShape(Circle())
+        .mainWindowSymbolHoverRegion()
         .onTapGesture { action() }
         .onHover { hovering in
             withAnimation(.easeOut(duration: 0.15)) { isHovered = hovering }
@@ -832,6 +852,7 @@ struct ExcludeCommandButton: View {
                 
                 if isIncluded {
                     Image(systemName: "checkmark")
+                        .mainWindowSymbolAnimation(.breathePlain, capturesClicks: false)
                         .font(.system(size: 6.5, weight: .black))
                         .foregroundStyle(Color.white)
                         .padding(1.5)
@@ -842,6 +863,7 @@ struct ExcludeCommandButton: View {
         }
         .frame(width: 60, height: 30)
         .contentShape(Capsule())
+        .mainWindowSymbolHoverRegion()
         .onTapGesture { action() }
         .onHover { hovering in
             withAnimation(.easeOut(duration: 0.15)) { isHovered = hovering }
@@ -866,11 +888,13 @@ struct BringToFrontButton: View {
                       : (isHovered ? Color.accentColor.opacity(0.15) : Color.clear))
                 .frame(width: 26, height: 26)
             Image(systemName: "square.3.layers.3d.top.filled")
+                .mainWindowSymbolAnimation(.wiggleByLayer, capturesClicks: false)
                 .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(isActive ? Color.white : (isHovered ? Color.accentColor : Color.secondary))
         }
         .frame(width: 26, height: 26)
         .contentShape(Circle())
+        .mainWindowSymbolHoverRegion()
         .onTapGesture { action() }
         .onHover { hovering in
             withAnimation(.easeOut(duration: 0.15)) { isHovered = hovering }
@@ -994,10 +1018,16 @@ struct AutoLayoutCenterView: View {
                 // 2. Visual Preview at the bottom (strictly fills remaining viewport height)
                 VStack(alignment: .leading, spacing: 10) {
                     HStack {
-                        Label("Window Arrangement".localized(appLanguage), systemImage: "rectangle.3.group")
+                        Label {
+                            Text("Window Arrangement".localized(appLanguage))
+                        } icon: {
+                            Image(systemName: "rectangle.3.group")
+                                .mainWindowSymbolAnimation(.wiggleByLayer)
+                        }
                             .font(.system(.headline, design: .rounded))
+                            .mainWindowSymbolHoverRegion()
                         Spacer()
-                        if let count = activeEntry?.windowCount ?? activeSnapshot?.records.count {
+                        if let count = activeEntry?.previewWindowCount ?? activeSnapshot?.previewRecords.count {
                             Text(count == 1 ? "1 window".localized(appLanguage) : "\(count) \("windows".localized(appLanguage))")
                                 .font(.system(size: 12, weight: .medium, design: .rounded))
                                 .foregroundStyle(.secondary)
@@ -1020,7 +1050,7 @@ struct AutoLayoutCenterView: View {
                             }
                         )
                         .frame(maxWidth: .infinity, minHeight: 160, maxHeight: .infinity)
-                        .animation(.spring(response: 0.4, dampingFraction: 0.8), value: snap.records.count)
+                        .animation(.spring(response: 0.4, dampingFraction: 0.8), value: snap.previewRecords.count)
                     } else {
                         RoundedRectangle(cornerRadius: 16, style: .continuous)
                             .fill(Color.primary.opacity(0.04))
@@ -1045,19 +1075,23 @@ struct AutoLayoutCenterView: View {
 
     private func earlierCaptureBanner(entry: AutoSaveEntry) -> some View {
         HStack(spacing: 10) {
-            Image(systemName: "clock.arrow.circlepath")
-                .font(.system(size: 15, weight: .semibold))
-                .foregroundStyle(themeColor.color(seed: 0))
-                .frame(width: 22, height: 22)
-                .background(themeColor.color(seed: 0).opacity(0.12), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+            HStack(spacing: 10) {
+                Image(systemName: "clock.arrow.circlepath")
+                    .mainWindowSymbolAnimation(.wiggleByLayer)
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(themeColor.color(seed: 0))
+                    .frame(width: 22, height: 22)
+                    .background(themeColor.color(seed: 0).opacity(0.12), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
 
-            VStack(alignment: .leading, spacing: 1) {
-                Text("Viewing Earlier Capture".localized(appLanguage))
-                    .font(.system(size: 14, weight: .semibold, design: .rounded))
-                Text(entry.capturedAt.formatted(.relative(presentation: .named)))
-                    .font(.system(size: 12, design: .rounded))
-                    .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Viewing Earlier Capture".localized(appLanguage))
+                        .font(.system(size: 14, weight: .semibold, design: .rounded))
+                    Text(entry.capturedAt.formatted(.relative(presentation: .named)))
+                        .font(.system(size: 12, design: .rounded))
+                        .foregroundStyle(.secondary)
+                }
             }
+            .mainWindowSymbolHoverRegion()
 
             Spacer(minLength: 10)
 
@@ -1067,10 +1101,16 @@ struct AutoLayoutCenterView: View {
                     isEarlierExpanded = false
                 }
             } label: {
-                Label("Return to Latest".localized(appLanguage), systemImage: "arrow.uturn.backward")
+                Label {
+                    Text("Return to Latest".localized(appLanguage))
+                } icon: {
+                    Image(systemName: "arrow.uturn.backward")
+                        .mainWindowSymbolAnimation(.flip, capturesClicks: false)
+                }
                     .font(.system(size: 12, weight: .semibold))
             }
             .buttonStyle(.borderedProminent)
+            .mainWindowSymbolHoverRegion()
             .controlSize(.small)
             .tint(themeColor.color(seed: 0))
             .keyboardShortcut(.escape, modifiers: [])
@@ -1124,7 +1164,7 @@ struct AutoLayoutSidebarWindowListView: View {
     }
 
     private var records: [WindowRecord] {
-        activeEntry?.records.filter { !$0.windowID.appBundleID.isEmpty } ?? []
+        activeEntry?.previewRecords.filter { !$0.windowID.appBundleID.isEmpty } ?? []
     }
 
     var body: some View {
@@ -1212,6 +1252,7 @@ struct AutoLayoutSidebarWindowListView: View {
                     if records.isEmpty {
                         VStack(spacing: 8) {
                             Image(systemName: "macwindow.badge.plus")
+                                .mainWindowSymbolAnimation(.wiggleByLayer)
                                 .font(.system(size: 28))
                                 .foregroundStyle(.tertiary)
                             Text("No windows captured yet".localized(appLanguage))
@@ -1225,6 +1266,7 @@ struct AutoLayoutSidebarWindowListView: View {
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 24)
                         .padding(.horizontal, 12)
+                        .mainWindowSymbolHoverRegion()
                     } else {
                         LazyVStack(spacing: 6) {
                             ForEach(records) { record in
@@ -1274,6 +1316,7 @@ struct AutoLayoutRememberedDisplayRow: View {
 
         HStack(spacing: 10) {
             Image(systemName: systemIcon)
+                .mainWindowSymbolAnimation(.wiggleByLayer, capturesClicks: false)
                 .font(.system(size: 16))
                 .foregroundStyle(isLive ? themeColor.color(seed: 0) : .secondary)
                 .frame(width: 22)
@@ -1295,7 +1338,7 @@ struct AutoLayoutRememberedDisplayRow: View {
                     }
                 }
 
-                Text(String(format: "%d windows · %@", entry.windowCount, entry.capturedAt.formatted(.relative(presentation: .named))))
+                Text(String(format: "%d windows · %@", entry.previewWindowCount, entry.capturedAt.formatted(.relative(presentation: .named))))
                     .font(.system(size: 10))
                     .foregroundStyle(.tertiary)
                     .lineLimit(1)
@@ -1319,6 +1362,7 @@ struct AutoLayoutRememberedDisplayRow: View {
             isHovered: isHovered
         )
         .contentShape(Rectangle())
+        .mainWindowSymbolHoverRegion()
         .onHover { hovering in
             withAnimation(.easeOut(duration: 0.12)) {
                 isHovered = hovering
@@ -1351,6 +1395,7 @@ struct AutoLayoutSidebarWindowRow: View {
 
                     if record.isFullScreenMode {
                         Image(systemName: "arrow.up.left.and.arrow.down.right")
+                            .mainWindowSymbolAnimation(.wiggle, capturesClicks: false)
                             .font(.system(size: 9, weight: .bold))
                             .foregroundStyle(.indigo)
                     }
@@ -1395,6 +1440,7 @@ struct AutoLayoutSidebarWindowRow: View {
                 .stroke(isSelected ? themeColor.color(seed: 0).opacity(0.4) : Color.clear, lineWidth: 1)
         }
         .contentShape(Rectangle())
+        .mainWindowSymbolHoverRegion()
         .onHover { hovering in
             withAnimation(.easeOut(duration: 0.12)) {
                 isHovered = hovering

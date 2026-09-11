@@ -65,14 +65,18 @@ struct ActivityView: View {
                             pasteboard.setString(text, forType: .string)
                         }) {
                             Image(systemName: "doc.on.doc")
+                                .mainWindowSymbolAnimation(.wiggle, capturesClicks: false)
                         }
                         .buttonStyle(.plain)
+                        .mainWindowSymbolHoverRegion()
                         .help("Copy Full Log".localized(appLanguage))
 
                         Button(action: { manager.clearEvents() }) {
                             Image(systemName: "trash")
+                                .mainWindowSymbolAnimation(.wiggleByLayer, capturesClicks: false)
                         }
                         .buttonStyle(.plain)
+                        .mainWindowSymbolHoverRegion()
                         .help("Clear Log".localized(appLanguage))
                     }
                     .font(.system(size: 11))
@@ -87,6 +91,7 @@ struct ActivityView: View {
                         if manager.recentEvents.isEmpty {
                             VStack(spacing: 8) {
                                 Image(systemName: "circle.dotted")
+                                    .mainWindowSymbolAnimation(.breathePlain)
                                     .font(.system(size: 20, weight: .light))
                                     .foregroundStyle(.tertiary)
                                 Text("History is empty".localized(appLanguage))
@@ -95,6 +100,7 @@ struct ActivityView: View {
                             }
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 40)
+                            .mainWindowSymbolHoverRegion()
                         } else {
                             ForEach(manager.recentEvents.reversed()) { event in
                                 eventRow(event)
@@ -127,6 +133,7 @@ struct ActivityView: View {
                     .fill(eventColor.opacity(themeColor.isGalaxy ? 0.22 : 0.15))
                     .frame(width: 24, height: 24)
                 Image(systemName: event.type.icon)
+                    .mainWindowSymbolAnimation(.breathe)
                     .font(.system(size: 11, weight: .black))
                     .foregroundStyle(eventColor)
             }
@@ -178,5 +185,6 @@ struct ActivityView: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
         .liquidGlass(cornerRadius: 10, style: .card)
+        .mainWindowSymbolHoverRegion()
     }
 }

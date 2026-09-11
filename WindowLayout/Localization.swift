@@ -622,9 +622,6 @@ private let translationDict: [String: String] = [
     "Added": "נוסף",
     "Home": "בית",
     "Notifications": "התראות",
-    "Stabilizing Windows": "מייצב חלונות",
-    "One window is settling into place": "חלון אחד מתייצב במקומו",
-    "%d windows are settling into place": "%d חלונות מתייצבים במקומם",
     "waiting for their Space": "ממתינים למרחב העבודה שלהם",
 ]
 

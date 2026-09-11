@@ -139,6 +139,11 @@ struct LayoutSnapshot: Codable, Identifiable {
         return translatedParts.joined(separator: " + ")
     }
 
+    /// Window records filtered for visual layout previews and UI count badges.
+    var previewRecords: [WindowRecord] {
+        records.previewRecords
+    }
+
     mutating func upsert(_ record: WindowRecord) {
         if let idx = records.firstIndex(where: { $0.windowID == record.windowID }) {
             records[idx] = record
@@ -623,5 +628,43 @@ struct LayoutStore: Codable {
     }
 
     init() {}
+}
+
+// MARK: - Auxiliary Full-Screen Strip Filtering for Visual Previews
+
+extension Array where Element == WindowRecord {
+    /// Window records filtered for visual layout previews and UI display counts.
+    /// Excludes auxiliary full-screen strips (such as Safari's 80pt top navigation/tab bar window)
+    /// where an untitled top-edge window with small height (<= 120 pt) exists for an application
+    /// that already has a full-screen window on that display.
+    var previewRecords: [WindowRecord] {
+        filter { record in
+            !isAuxiliaryFullScreenStrip(record)
+        }
+    }
+
+    private func isAuxiliaryFullScreenStrip(_ record: WindowRecord) -> Bool {
+        let title = record.windowID.windowTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard title.isEmpty else { return false }
+
+        let frame = record.globalFrame
+        guard frame.height <= 120 else { return false }
+
+        let screenMaxY = record.screenFrame?.maxY ?? (NSScreen.main?.frame.maxY ?? 0)
+        guard abs(frame.maxY - screenMaxY) <= 45 else { return false }
+
+        let appBundleID = record.windowID.appBundleID
+        return contains { other in
+            guard other.id != record.id && other.windowID.appBundleID == appBundleID else { return false }
+            if other.isFullScreenMode == true || other.isNativeFullScreen == true {
+                return true
+            }
+            if let screen = record.screenFrame {
+                return other.globalFrame.width >= screen.width * 0.9 &&
+                       other.globalFrame.height >= screen.height * 0.8
+            }
+            return false
+        }
+    }
 }
 

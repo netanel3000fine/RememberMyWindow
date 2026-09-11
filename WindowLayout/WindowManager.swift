@@ -4247,10 +4247,6 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
                             defer { self?.isSettlingContestedWindows = false }
                             var contested = stubborn.map { (target: $0, wasAt: CGRect.null) }
                             var attempt = 0
-                            // Announced once, not once per window and not once
-                            // per round: the user needs to know why windows are
-                            // moving, told once.
-                            var announced = false
                             for delay in Self.lateCorrectionDelays {
                                 attempt += 1
                                 try? await Task.sleep(nanoseconds: delay)
@@ -4301,22 +4297,6 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
                                             _ = AXUIElementSetAttributeValue(target.element, kAXPositionAttribute as CFString, value)
                                         }
                                     } else {
-                                        if !announced {
-                                            announced = true
-                                            let n = contested.count
-                                            // The nudge is the only visible thing
-                                            // RMW does — a window appears on the
-                                            // wrong screen for a moment. Unexplained
-                                            // that reads as a glitch, so say it is
-                                            // deliberate before it happens.
-                                            self.deliverNotification(
-                                                type: .displayChange,
-                                                title: lz("Stabilizing Windows"),
-                                                subtitle: n == 1
-                                                    ? lz("One window is settling into place")
-                                                    : String(format: lz("%d windows are settling into place"), n),
-                                                isCompact: true)
-                                        }
                                         self.log("↪︎ Nudging \(target.record.windowID.appName ?? "a window") via another display",
                                                  level: .verbose, type: .restore)
                                         await Self.nudgeViaAnotherDisplay(target.element,

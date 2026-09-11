@@ -67,6 +67,7 @@ struct AutoLayoutHeroCard: View {
 
                 HStack(spacing: 6) {
                     Image(systemName: "macwindow")
+                        .mainWindowSymbolAnimation(.wiggleByLayer)
                     Text(windowCount == 1 ? "1 window".localized(language) : "\(windowCount) \("windows".localized(language))")
                     if let screenName {
                         Text("·").foregroundStyle(.tertiary)
@@ -78,6 +79,7 @@ struct AutoLayoutHeroCard: View {
                 .font(.system(size: 13, weight: .medium))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
+                .mainWindowSymbolHoverRegion()
 
                 // A stale card mutes its heading and its age, so the button
                 // must come down with them. Leaving the loudest element at full
@@ -137,6 +139,7 @@ struct AutoLayoutHeroCard: View {
         Button(action: onRestore) {
             HStack(spacing: 7) {
                 Image(systemName: "arrow.uturn.backward")
+                    .mainWindowSymbolAnimation(.flip, capturesClicks: false)
                     .font(.system(size: 15, weight: .semibold))
                     .foregroundStyle(tint)
                 Text("Restore".localized(language))
@@ -148,6 +151,7 @@ struct AutoLayoutHeroCard: View {
             .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         }
         .buttonStyle(.plain)
+        .mainWindowSymbolHoverRegion()
         .disabled(!matchesCurrentScreens)
         .opacity(matchesCurrentScreens ? 1 : 0.42)
         .accessibilityLabel(Text("Restore the auto layout".localized(language)))
@@ -197,6 +201,7 @@ struct AutoLayoutHeroCard: View {
             }
             .foregroundStyle(.primary)
             .contentShape(Rectangle())
+            .mainWindowSymbolHoverRegion()
         }
     }
 
@@ -215,9 +220,10 @@ struct AutoLayoutHeroCard: View {
         var body: some View {
             Button(action: action) {
                 HStack(spacing: 7) {
-                    Image(systemName: isApplicable
+                        Image(systemName: isApplicable
                           ? (isSelected ? "checkmark.circle.fill" : "arrow.uturn.backward")
                           : "display.trianglebadge.exclamationmark")
+                        .mainWindowSymbolAnimation(.wiggleByLayer, capturesClicks: false)
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(isApplicable ? AnyShapeStyle(tint) : AnyShapeStyle(.tertiary))
                         .frame(width: 16)
@@ -249,6 +255,7 @@ struct AutoLayoutHeroCard: View {
             }
             .buttonStyle(.plain)
             .disabled(!isApplicable)
+            .mainWindowSymbolHoverRegion()
             .onHover { isHovering = $0 }
             .help(isApplicable
                   ? Text("Select and view this capture".localized(language))
@@ -262,12 +269,18 @@ struct AutoLayoutHeroCard: View {
     private var header: some View {
         HStack(spacing: 6) {
             Image(systemName: "clock.arrow.circlepath")
+                .mainWindowSymbolAnimation(.wiggleByLayer)
                 .font(.system(size: 14, weight: .semibold))
             Text("AUTO LAYOUT TIMELINE".localized(language))
                 .font(.system(size: 13, weight: .bold))
             Spacer()
             if hasCapture && !matchesCurrentScreens {
-                Label("OTHER DISPLAYS".localized(language), systemImage: "display.trianglebadge.exclamationmark")
+                Label {
+                    Text("OTHER DISPLAYS".localized(language))
+                } icon: {
+                    Image(systemName: "display.trianglebadge.exclamationmark")
+                        .mainWindowSymbolAnimation(.breathe)
+                }
                     .font(.system(size: 10, weight: .semibold))
                     .padding(.horizontal, 6)
                     .padding(.vertical, 2)
@@ -276,13 +289,20 @@ struct AutoLayoutHeroCard: View {
             }
         }
         .foregroundStyle(!hasCapture || isStale ? AnyShapeStyle(.secondary) : AnyShapeStyle(tint))
+        .mainWindowSymbolHoverRegion()
     }
 
     private func footnote(_ text: String, systemImage: String) -> some View {
-        Label(text.localized(language), systemImage: systemImage)
+        Label {
+            Text(text.localized(language))
+        } icon: {
+            Image(systemName: systemImage)
+                .mainWindowSymbolAnimation(.breathePlain)
+        }
             .font(.system(size: 11))
             .foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
+            .mainWindowSymbolHoverRegion()
     }
 
     /// Spelled out rather than using `Text(_:style:.relative)`, which cannot be

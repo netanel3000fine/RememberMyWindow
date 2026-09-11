@@ -24,6 +24,8 @@ struct AutoSaveEntry: Codable, Identifiable {
     let records: [WindowRecord]
 
     var windowCount: Int { records.count }
+    var previewRecords: [WindowRecord] { records.previewRecords }
+    var previewWindowCount: Int { previewRecords.count }
 }
 
 struct AutoSaveFile: Codable {
