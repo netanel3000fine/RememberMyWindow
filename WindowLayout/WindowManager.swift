@@ -5589,31 +5589,92 @@ enum DebugLogSink {
     private static let enabled = UserDefaults.standard.bool(forKey: "debugLogToFile")
     private static let queue = DispatchQueue(label: "com.netanel.remembermywindows.debuglog")
 
-    private static let handle: FileHandle? = {
+    /// Roll the file over past this size, keeping one previous generation, so the
+    /// log costs at most twice this on disk however long the app runs.
+    ///
+    /// Sized from what this log actually writes rather than picked round: an
+    /// ordinary day is a few MB, so 8 MB holds several days of history while a
+    /// runaway is capped instead of filling the disk. Without a bound this file
+    /// only ever grows — it is append-only and nothing ever trims it.
+    private static let rotateAtBytes: UInt64 = 8 * 1024 * 1024
+
+    /// Measuring the file on every line would ask the filesystem thousands of
+    /// times a minute for a number that moves slowly. Checking once every this
+    /// many writes costs nothing and still catches growth long before it matters.
+    private static let sizeCheckEveryWrites = 500
+
+    private static let logURL: URL = FileManager.default
+        .urls(for: .libraryDirectory, in: .userDomainMask)[0]
+        .appendingPathComponent("Logs/RememberMyWindows", isDirectory: true)
+        .appendingPathComponent("debug.log")
+
+    private static let previousLogURL: URL =
+        logURL.deletingLastPathComponent().appendingPathComponent("debug.log.1")
+
+    /// Mutable, because rotation closes this handle and opens a new one. Every
+    /// read and write of it happens on `queue`, which is what keeps it safe.
+    private static var handle: FileHandle? = openHandle()
+    private static var writesSinceSizeCheck = 0
+
+    private static func openHandle() -> FileHandle? {
         guard enabled else { return nil }
-        let dir = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Logs/RememberMyWindows", isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        let url = dir.appendingPathComponent("debug.log")
-        if !FileManager.default.fileExists(atPath: url.path) {
-            FileManager.default.createFile(atPath: url.path, contents: nil)
+        let fm = FileManager.default
+        try? fm.createDirectory(at: logURL.deletingLastPathComponent(),
+                                withIntermediateDirectories: true)
+        if !fm.fileExists(atPath: logURL.path) {
+            fm.createFile(atPath: logURL.path, contents: nil)
         }
-        let h = try? FileHandle(forWritingTo: url)
+        let h = try? FileHandle(forWritingTo: logURL)
         _ = try? h?.seekToEnd()
         return h
-    }()
+    }
 
+    /// Call on `queue` only.
+    private static func rotateIfNeeded() {
+        writesSinceSizeCheck += 1
+        guard writesSinceSizeCheck >= sizeCheckEveryWrites else { return }
+        writesSinceSizeCheck = 0
+
+        // The handle is append-only, so its offset IS the file size. Cheaper
+        // than asking the filesystem, and it cannot disagree with what we wrote.
+        guard let h = handle, let size = try? h.offset(), size >= rotateAtBytes else { return }
+
+        let fm = FileManager.default
+        try? h.close()
+        handle = nil
+        try? fm.removeItem(at: previousLogURL)   // absent on the first rollover
+        try? fm.moveItem(at: logURL, to: previousLogURL)
+        handle = openHandle()
+
+        // Say where the earlier lines went, so a reader who opens the new file
+        // and finds it starting mid-story knows there is more next door.
+        if let h = handle,
+           let note = "\(stamp.string(from: Date())) [System] Log rolled over at \(size) bytes — earlier lines are in debug.log.1\n"
+                .data(using: .utf8) {
+            try? h.write(contentsOf: note)
+        }
+    }
+
+    /// Carries the DATE, not just the time. Without it two lines an hour apart
+    /// and two lines a week apart look identical, so the log cannot answer
+    /// "did this start when I upgraded?" — which is most of what it is for.
     private static let stamp: DateFormatter = {
         let f = DateFormatter()
-        f.dateFormat = "HH:mm:ss.SSS"
+        f.dateFormat = "yyyy-MM-dd HH:mm:ss.SSS"
         return f
     }()
 
     static func write(type: String, msg: String, details: [String]?) {
-        guard enabled, let h = handle else { return }
+        guard enabled else { return }
+        // Stamped here rather than on the queue, so the line carries the time the
+        // event happened rather than the time it reached the disk.
         var line = "\(stamp.string(from: Date())) [\(type)] \(msg)\n"
         for d in details ?? [] { line += "    - \(d)\n" }
         guard let data = line.data(using: .utf8) else { return }
-        queue.async { try? h.write(contentsOf: data) }
+        queue.async {
+            rotateIfNeeded()
+            guard let h = handle else { return }
+            try? h.write(contentsOf: data)
+        }
     }
 }
