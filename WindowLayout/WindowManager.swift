@@ -7,6 +7,22 @@ import CoreLocation
 import ServiceManagement
 import UserNotifications
 
+/// The `AXValue` an accessibility query returned, or nil if it returned
+/// something else.
+///
+/// `AXValue` is a CoreFoundation type, and a Swift cast does not check CF types
+/// the way it checks class types: `as!` reinterprets whatever it was handed and
+/// passes it to `AXValueGetValue`, which then reads it as a `CGPoint` or
+/// `CGSize`. An app that answers a position query with a different CF type
+/// takes the whole process down. `CFGetTypeID` is the only real test.
+///
+/// `axFrame(of:)` already guards this way. This is that guard, in one place, so
+/// the rest of the file can use it too.
+private func axValue(_ ref: CFTypeRef?) -> AXValue? {
+    guard let ref, CFGetTypeID(ref) == AXValueGetTypeID() else { return nil }
+    return (ref as! AXValue)
+}
+
 @MainActor
 final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate, UNUserNotificationCenterDelegate {
 
@@ -1922,12 +1938,11 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
         var sizeRef: CFTypeRef?
         guard AXUIElementCopyAttributeValue(element, kAXPositionAttribute as CFString, &posRef) == .success,
               AXUIElementCopyAttributeValue(element, kAXSizeAttribute as CFString, &sizeRef) == .success,
-              let p = posRef, CFGetTypeID(p) == AXValueGetTypeID(),
-              let sz = sizeRef, CFGetTypeID(sz) == AXValueGetTypeID() else { return nil }
+              let p = axValue(posRef), let sz = axValue(sizeRef) else { return nil }
         var origin = CGPoint.zero
         var size = CGSize.zero
-        guard AXValueGetValue(p as! AXValue, .cgPoint, &origin),
-              AXValueGetValue(sz as! AXValue, .cgSize, &size) else { return nil }
+        guard AXValueGetValue(p, .cgPoint, &origin),
+              AXValueGetValue(sz, .cgSize, &size) else { return nil }
         return CGRect(origin: origin, size: size)
     }
 
@@ -3007,8 +3022,8 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
                 
                 var pos = CGPoint.zero
                 var size = CGSize.zero
-                if let posVal = posRef as! AXValue?, AXValueGetValue(posVal, .cgPoint, &pos) {}
-                if let sizeVal = sizeRef as! AXValue?, AXValueGetValue(sizeVal, .cgSize, &size) {}
+                if let posVal = axValue(posRef), AXValueGetValue(posVal, .cgPoint, &pos) {}
+                if let sizeVal = axValue(sizeRef), AXValueGetValue(sizeVal, .cgSize, &size) {}
                 
                 var fsRef: CFTypeRef?
                 var isFullScreen = false
@@ -4570,14 +4585,14 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
         var size = CGSize.zero
         
         guard AXUIElementCopyAttributeValue(element, kAXPositionAttribute as CFString, &positionValueRef) == .success,
-              let positionValue = positionValueRef,
-              AXValueGetValue((positionValue as! AXValue), .cgPoint, &position) else {
+              let positionValue = axValue(positionValueRef),
+              AXValueGetValue(positionValue, .cgPoint, &position) else {
             return nil
         }
         
         guard AXUIElementCopyAttributeValue(element, kAXSizeAttribute as CFString, &sizeValueRef) == .success,
-              let sizeValue = sizeValueRef,
-              AXValueGetValue((sizeValue as! AXValue), .cgSize, &size) else {
+              let sizeValue = axValue(sizeValueRef),
+              AXValueGetValue(sizeValue, .cgSize, &size) else {
             return nil
         }
         
@@ -4637,8 +4652,8 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
                 var positionValueRef: AnyObject?
                 var position = CGPoint.zero
                 if AXUIElementCopyAttributeValue(win, kAXPositionAttribute as CFString, &positionValueRef) == .success,
-                   let positionValue = positionValueRef {
-                    AXValueGetValue((positionValue as! AXValue), .cgPoint, &position)
+                   let positionValue = axValue(positionValueRef) {
+                    AXValueGetValue(positionValue, .cgPoint, &position)
                 }
                 
                 let screens = NSScreen.screens
