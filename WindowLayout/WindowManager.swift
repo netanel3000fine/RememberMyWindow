@@ -2728,6 +2728,10 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
 
     /// Settings hover-preview: fires only the specified channel with realistic notification text and icons.
     func previewChannelNotification(channel: NotificationChannel, eventType: NotificationEventType) {
+        if case .displayChange = eventType, store.welcomeNotchPillEnabled {
+            return
+        }
+
         let (title, subtitle, isCompact, bundleID): (String, String, Bool, String?) = {
             switch eventType {
             case .fullRestore:
@@ -2857,6 +2861,9 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
             guard let self = self else { return }
             let masterNotificationsEnabled = UserDefaults.standard.object(forKey: "masterNotificationsEnabled") as? Bool ?? true
             guard masterNotificationsEnabled else { return }
+            if case .displayChange = type, self.store.welcomeNotchPillEnabled {
+                return
+            }
             let masterSoundEnabled = UserDefaults.standard.object(forKey: "masterSoundEnabled") as? Bool ?? true
             // 1. Notch Notification (suppressed while screen is locked to prevent LockScreen compositor flickering)
             let showNotch = UserDefaults.standard.object(forKey: "showNotchNotification") as? Bool ?? true

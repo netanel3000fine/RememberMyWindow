@@ -1050,9 +1050,10 @@ struct SettingsView: View {
 
                 if masterNotificationsEnabled {
                     // ── Notch Notification Nav Row ──────────────────────────────
+                    let displayChangeSuppressed = manager.store.welcomeNotchPillEnabled
                     let notchActiveCount = (manager.store.notchNotifyOnFullRestore ? 1 : 0) +
                                           (manager.store.notchNotifyOnSingleRestore ? 1 : 0) +
-                                          (manager.store.notchNotifyOnDisplayChange ? 1 : 0) +
+                                          (manager.store.notchNotifyOnDisplayChange && !displayChangeSuppressed ? 1 : 0) +
                                           (manager.store.notchNotifyOnSnapshotUpdate ? 1 : 0) +
                                           (manager.store.notchNotifyOnDesktopToggle ? 1 : 0)
                     NotificationChannelNavRow(
@@ -1071,7 +1072,7 @@ struct SettingsView: View {
                     // ── System Notification Nav Row ──────────────────────────────
                     let sysActiveCount = (manager.store.systemNotifyOnFullRestore ? 1 : 0) +
                                         (manager.store.systemNotifyOnSingleRestore ? 1 : 0) +
-                                        (manager.store.systemNotifyOnDisplayChange ? 1 : 0) +
+                                        (manager.store.systemNotifyOnDisplayChange && !displayChangeSuppressed ? 1 : 0) +
                                         (manager.store.systemNotifyOnSnapshotUpdate ? 1 : 0) +
                                         (manager.store.systemNotifyOnDesktopToggle ? 1 : 0)
                     NotificationChannelNavRow(
@@ -3096,7 +3097,9 @@ struct NotificationChannelDetailView: View {
                                         soundName: Binding(
                                             get: { channel == .notch ? manager.store.notchSoundNameDisplayChange : manager.store.systemSoundNameDisplayChange },
                                             set: { v in channel == .notch ? (manager.store.notchSoundNameDisplayChange = v) : (manager.store.systemSoundNameDisplayChange = v); manager.persist() }
-                                        )
+                                        ),
+                                        isDisabled: manager.store.welcomeNotchPillEnabled,
+                                        disabledReason: "Unavailable while Welcome Notch Pill is on"
                                     )
 
                                     eventCard(
@@ -3199,7 +3202,9 @@ struct NotificationChannelDetailView: View {
                                         soundName: Binding(
                                             get: { channel == .notch ? manager.store.notchSoundNameDisplayChange : manager.store.systemSoundNameDisplayChange },
                                             set: { v in channel == .notch ? (manager.store.notchSoundNameDisplayChange = v) : (manager.store.systemSoundNameDisplayChange = v); manager.persist() }
-                                        )
+                                        ),
+                                        isDisabled: manager.store.welcomeNotchPillEnabled,
+                                        disabledReason: "Unavailable while Welcome Notch Pill is on"
                                     )
 
                                     eventCard(
@@ -4071,6 +4076,12 @@ private struct EventCardView: View {
             }
             hoverWorkItem = work
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.8, execute: work)
+        }
+        .onChange(of: isDisabled) { _, disabled in
+            guard disabled else { return }
+            isHovered = false
+            hoverWorkItem?.cancel()
+            hoverWorkItem = nil
         }
         .onDisappear {
             focusFlipTask?.cancel()

@@ -245,6 +245,7 @@ private let translationDict: [String: String] = [
     "Records your arrangement to its own file as you work, so it survives a quit, a sleep or a reboot. Your saved sessions are never written to, but while this is on, automatic restores prefer the newer Auto layout over them. Switching it off stops the recording and leaves the file in place.": "שומר את סידור החלונות שלך בקובץ נפרד בזמן העבודה, כך שהוא נשמר גם לאחר יציאה, מצב שינה או הפעלה מחדש. המפגשים השמורים שלך לעולם אינם נכתבים מחדש, אך כאשר מצב זה מופעל, שחזורים אוטומטיים מעדיפים את הסידור האוטומטי החדש יותר. כיבוי המצב עוצר את ההקלטה ומשאיר את הקובץ במקומו.",
     "Auto Layout is on": "סידור אוטומטי מופעל",
     "Unavailable while Auto Layout is on": "לא זמין כאשר סידור אוטומטי מופעל",
+    "Unavailable while Welcome Notch Pill is on": "לא זמין כאשר התראת הפתיחה במגרעת מופעלת",
     "Enable Desktop Toggle first": "הפעל תחילה את החלפת מצב שולחן העבודה",
     "Feature Guide": "מדריך תכונות",
     "Display reconnects, startup & polling": "חיבור מסכים מחדש, הפעלה בדיקה מחזורית",
