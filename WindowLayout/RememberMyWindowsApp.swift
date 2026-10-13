@@ -311,6 +311,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var lastFrontmostAppID: String?
     private var windowServerCursorCancellable: AnyCancellable?
     private var hasWindowServerCursorOverride = false
+    private var titlebarZoomMonitor: Any?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Enforce single instance: If another copy of RememberMyWindows is already running, activate it and terminate this new instance
@@ -384,6 +385,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func setupWindowObservers() {
+        installTitlebarZoomMonitor()
+
         // Automatically show/hide Dock icon based on window visibility
         let nc = NotificationCenter.default
         
@@ -454,6 +457,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        if let titlebarZoomMonitor {
+            NSEvent.removeMonitor(titlebarZoomMonitor)
+            self.titlebarZoomMonitor = nil
+        }
         endWindowServerCursorOverride()
         WindowManager.shared.stopTracking()
     }
@@ -504,6 +511,44 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func isMainWindow(_ w: NSWindow) -> Bool {
         w.title == "RememberMyWindows" || w.identifier?.rawValue.contains("main") == true
+    }
+
+    private func installTitlebarZoomMonitor() {
+        guard titlebarZoomMonitor == nil else { return }
+
+        // A hidden-titlebar SwiftUI toolbar doesn't forward double-clicks on
+        // its blank area to AppKit's native titlebar zoom action.
+        titlebarZoomMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { [weak self] event in
+            guard event.clickCount == 2,
+                  let window = event.window,
+                  let self else { return event }
+
+            return MainActor.assumeIsolated {
+                guard self.isMainWindow(window),
+                      event.locationInWindow.y >= window.contentLayoutRect.maxY,
+                      !self.isInteractiveTitlebarTarget(at: NSEvent.mouseLocation, in: window) else {
+                    return event
+                }
+
+                window.performZoom(nil)
+                return nil
+            }
+        }
+    }
+
+    private func isInteractiveTitlebarTarget(at point: CGPoint, in window: NSWindow) -> Bool {
+        guard let target = window.accessibilityHitTest(point) as? NSAccessibility,
+              let role = target.accessibilityRole else { return false }
+
+        return [
+            NSAccessibilityButtonRole,
+            NSAccessibilityRadioButtonRole,
+            NSAccessibilityCheckBoxRole,
+            NSAccessibilitySliderRole,
+            NSAccessibilityTabGroupRole,
+            NSAccessibilityPopUpButtonRole,
+            NSAccessibilityMenuButtonRole
+        ].contains(role)
     }
 
     private func closeSettingsWindow() {
