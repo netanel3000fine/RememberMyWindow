@@ -35,7 +35,9 @@ struct RememberMyWindowsApp: App {
                 .environment(\.locale, currentLocale)
         }
         .windowStyle(.hiddenTitleBar)
-        .windowResizability(.contentSize)
+        // Keep the content-derived minimum while allowing native titlebar zoom
+        // to expand the window beyond its ideal content size.
+        .windowResizability(.contentMinSize)
         .defaultSize(width: 1150, height: 750)
         .handlesExternalEvents(matching: ["main"])
 
