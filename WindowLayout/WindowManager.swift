@@ -6072,6 +6072,16 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
         }
     }
 
+    /// Reassigns the value-type store so views observing `store` are notified
+    /// immediately when this setting changes.
+    func setWelcomeNotchPillEnabled(_ isEnabled: Bool) {
+        guard store.welcomeNotchPillEnabled != isEnabled else { return }
+
+        var updatedStore = store
+        updatedStore.welcomeNotchPillEnabled = isEnabled
+        store = updatedStore
+    }
+
     /// Keeps the first bad copy beside the original and refuses to save over
     /// it. A later launch must not replace that copy with a second, less
     /// interesting failure.

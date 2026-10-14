@@ -3097,9 +3097,7 @@ struct NotificationChannelDetailView: View {
                                         soundName: Binding(
                                             get: { channel == .notch ? manager.store.notchSoundNameDisplayChange : manager.store.systemSoundNameDisplayChange },
                                             set: { v in channel == .notch ? (manager.store.notchSoundNameDisplayChange = v) : (manager.store.systemSoundNameDisplayChange = v); manager.persist() }
-                                        ),
-                                        isDisabled: manager.store.welcomeNotchPillEnabled,
-                                        disabledReason: "Unavailable while Welcome Notch Pill is on"
+                                        )
                                     )
 
                                     eventCard(
@@ -3202,9 +3200,7 @@ struct NotificationChannelDetailView: View {
                                         soundName: Binding(
                                             get: { channel == .notch ? manager.store.notchSoundNameDisplayChange : manager.store.systemSoundNameDisplayChange },
                                             set: { v in channel == .notch ? (manager.store.notchSoundNameDisplayChange = v) : (manager.store.systemSoundNameDisplayChange = v); manager.persist() }
-                                        ),
-                                        isDisabled: manager.store.welcomeNotchPillEnabled,
-                                        disabledReason: "Unavailable while Welcome Notch Pill is on"
+                                        )
                                     )
 
                                     eventCard(
@@ -3438,8 +3434,7 @@ struct NotificationChannelDetailView: View {
                 isOn: Binding(
                     get: { manager.store.welcomeNotchPillEnabled },
                     set: { isEnabled in
-                        manager.store.welcomeNotchPillEnabled = isEnabled
-                        manager.persist()
+                        manager.setWelcomeNotchPillEnabled(isEnabled)
                     }
                 ),
                 soundIsOn: Binding(
@@ -3664,6 +3659,21 @@ private struct EventCardView: View {
         return soundPreferenceIsEnabled(in: channel)
     }
 
+    private var welcomePillDisablesDisplayChange: Bool {
+        eventType == .displayChange && manager.store.welcomeNotchPillEnabled
+    }
+
+    private var isEffectivelyDisabled: Bool {
+        isDisabled || welcomePillDisablesDisplayChange
+    }
+
+    private var effectiveDisabledReason: String? {
+        if isDisabled { return disabledReason }
+        return welcomePillDisablesDisplayChange
+            ? "Unavailable while Welcome Notch Pill is on"
+            : nil
+    }
+
     private var currentRouteHasSound: Bool {
         currentNotificationRouteIsActive && soundIsOn
     }
@@ -3764,7 +3774,7 @@ private struct EventCardView: View {
     }
 
     private var shouldShowSoundConflictWarning: Bool {
-        !isDisabled &&
+        !isEffectivelyDisabled &&
             currentNotificationRouteIsActive &&
             otherChannelSoundIsOn &&
             (currentRouteHasSound || attemptedConflictingSound)
@@ -3780,11 +3790,11 @@ private struct EventCardView: View {
 
     // The card's border and shadow, typed. Inline in `body` as nested ternaries of untyped
     // literals, Swift 6.4 (Xcode 27) could not type-check `body` in reasonable time.
-    private var isLifted: Bool { isHovered && isOn && !isDisabled }
+    private var isLifted: Bool { isHovered && isOn && !isEffectivelyDisabled }
 
     private var borderColor: Color {
         if isHighlighted { return Color.orange.opacity(0.9) }
-        if isDisabled { return Color.black.opacity(0.15) }
+        if isEffectivelyDisabled { return Color.black.opacity(0.15) }
         if isHovered && isOn { return activeColor.opacity(0.4) }
         return isOn ? activeColor.opacity(0.15) : Color.primary.opacity(0.06)
     }
@@ -3796,7 +3806,7 @@ private struct EventCardView: View {
 
     private var shadowColor: Color {
         if isHighlighted { return Color.orange.opacity(0.38) }
-        return isLifted ? activeColor.opacity(0.16) : Color.black.opacity(isDisabled ? 0.0 : 0.03)
+        return isLifted ? activeColor.opacity(0.16) : Color.black.opacity(isEffectivelyDisabled ? 0.0 : 0.03)
     }
 
     private var shadowRadius: CGFloat {
@@ -3825,8 +3835,8 @@ private struct EventCardView: View {
                 .scaleEffect(isHovered && isOn ? 1.05 : 1.0)
                 .animation(.spring(response: 0.25), value: isHovered)
                 .animation(.spring(response: 0.25), value: isOn)
-                .opacity(isDisabled ? 0.24 : 1.0)
-                .grayscale(isDisabled ? 1.0 : 0.0)
+                .opacity(isEffectivelyDisabled ? 0.24 : 1.0)
+                .grayscale(isEffectivelyDisabled ? 1.0 : 0.0)
 
                 VStack(alignment: .leading, spacing: 3) {
                     HStack(spacing: 6) {
@@ -3852,22 +3862,22 @@ private struct EventCardView: View {
                         }
                     }
                     .animation(.spring(response: 0.2, dampingFraction: 0.7), value: isHovered)
-                    .opacity(isDisabled ? 0.24 : 1.0)
-                    .grayscale(isDisabled ? 1.0 : 0.0)
+                    .opacity(isEffectivelyDisabled ? 0.24 : 1.0)
+                    .grayscale(isEffectivelyDisabled ? 1.0 : 0.0)
 
                     Text(subtitle.localized(appLanguage))
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
-                        .opacity(isDisabled ? 0.24 : 1.0)
-                        .grayscale(isDisabled ? 1.0 : 0.0)
+                        .opacity(isEffectivelyDisabled ? 0.24 : 1.0)
+                        .grayscale(isEffectivelyDisabled ? 1.0 : 0.0)
 
-                    if isDisabled, let disabledReason {
-                        Label(disabledReason.localized(appLanguage), systemImage: "info.circle")
+                    if isEffectivelyDisabled, let effectiveDisabledReason {
+                        Label(effectiveDisabledReason.localized(appLanguage), systemImage: "info.circle")
                             .font(.system(size: 10, weight: .semibold))
                             .foregroundStyle(Color.primary)
                             .fixedSize(horizontal: false, vertical: true)
-                            .accessibilityLabel(Text(disabledReason.localized(appLanguage)))
+                            .accessibilityLabel(Text(effectiveDisabledReason.localized(appLanguage)))
                     }
                 }
                 .animation(.easeInOut(duration: 0.2), value: isOn)
@@ -3880,9 +3890,9 @@ private struct EventCardView: View {
                     .labelsHidden()
                     .accessibilityLabel(Text(title.localized(appLanguage)))
                     .accessibilityHint(Text(subtitle.localized(appLanguage)))
-                    .disabled(isDisabled)
-                    .opacity(isDisabled ? 0.24 : 1.0)
-                    .grayscale(isDisabled ? 1.0 : 0.0)
+                    .disabled(isEffectivelyDisabled)
+                    .opacity(isEffectivelyDisabled ? 0.24 : 1.0)
+                    .grayscale(isEffectivelyDisabled ? 1.0 : 0.0)
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 12)
@@ -4017,16 +4027,17 @@ private struct EventCardView: View {
                 .padding(.horizontal, 14)
                 .padding(.bottom, 10)
                 .transition(.opacity.combined(with: .move(edge: .top)))
-                .disabled(isDisabled)
-                .opacity(isDisabled ? 0.24 : 1.0)
-                .grayscale(isDisabled ? 1.0 : 0.0)
+                .disabled(isEffectivelyDisabled)
+                .opacity(isEffectivelyDisabled ? 0.24 : 1.0)
+                .grayscale(isEffectivelyDisabled ? 1.0 : 0.0)
             }
         }
+        .disabled(isEffectivelyDisabled)
         .background(
             ZStack {
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(Color(NSColor.controlBackgroundColor).opacity(isDisabled ? 0.35 : (isHovered ? 0.85 : 0.65)))
-                if isDisabled {
+                    .fill(Color(NSColor.controlBackgroundColor).opacity(isEffectivelyDisabled ? 0.35 : (isHovered ? 0.85 : 0.65)))
+                if isEffectivelyDisabled {
                     RoundedRectangle(cornerRadius: 12, style: .continuous)
                         .fill(Color.black.opacity(0.42))
                 }
@@ -4038,7 +4049,7 @@ private struct EventCardView: View {
         )
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         .shadow(color: shadowColor, radius: shadowRadius, y: shadowY)
-        .offset(y: (isHovered && isOn && !isDisabled) ? -1.5 : 0)
+        .offset(y: (isHovered && isOn && !isEffectivelyDisabled) ? -1.5 : 0)
         .animation(.spring(response: 0.3, dampingFraction: 0.75), value: isHovered)
         .animation(.spring(response: 0.3, dampingFraction: 0.8), value: isOn)
         .animation(.spring(response: 0.3, dampingFraction: 0.8), value: soundIsOn)
@@ -4057,7 +4068,7 @@ private struct EventCardView: View {
             animateFocusFlipFlop()
         }
         .onHover { hovering in
-            guard !isDisabled else {
+            guard !isEffectivelyDisabled else {
                 isHovered = false
                 hoverWorkItem?.cancel()
                 return
@@ -4077,7 +4088,7 @@ private struct EventCardView: View {
             hoverWorkItem = work
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.8, execute: work)
         }
-        .onChange(of: isDisabled) { _, disabled in
+        .onChange(of: isEffectivelyDisabled) { _, disabled in
             guard disabled else { return }
             isHovered = false
             hoverWorkItem?.cancel()
