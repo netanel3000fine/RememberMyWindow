@@ -45,8 +45,15 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
 
     // MARK: - Published state
     @Published var store: LayoutStore = LayoutStore() {
-        didSet { persist() }
+        didSet {
+            if isWelcomeNotchPillEnabled != store.welcomeNotchPillEnabled {
+                isWelcomeNotchPillEnabled = store.welcomeNotchPillEnabled
+            }
+            persist()
+        }
     }
+    /// Published mirror used by settings UI and notification guards.
+    @Published private(set) var isWelcomeNotchPillEnabled = false
     @Published private(set) var currentFingerprint: ScreenFingerprint = .current()
     @Published private(set) var isTracking: Bool = false
     /// True until the first complete WindowServer-backed window capture finishes.
@@ -2598,7 +2605,7 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
     /// It shows on the first eligible restore after launch, when the layout is
     /// absent from the two most recent completed restores, or after eight hours.
     func evaluateWelcomeNotchPill(for layoutKey: String?) -> Bool {
-        guard store.welcomeNotchPillEnabled,
+        guard isWelcomeNotchPillEnabled,
               let layoutKey,
               !layoutKey.isEmpty else { return false }
 
@@ -2728,7 +2735,7 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
 
     /// Settings hover-preview: fires only the specified channel with realistic notification text and icons.
     func previewChannelNotification(channel: NotificationChannel, eventType: NotificationEventType) {
-        if case .displayChange = eventType, store.welcomeNotchPillEnabled {
+        if case .displayChange = eventType, isWelcomeNotchPillEnabled {
             return
         }
 
@@ -2766,6 +2773,9 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
 
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
+            if case .displayChange = eventType, self.isWelcomeNotchPillEnabled {
+                return
+            }
             let masterSoundEnabled = UserDefaults.standard.object(forKey: "masterSoundEnabled") as? Bool ?? true
             if channel == .notch {
                 // Force notch only — bypass showSystemNotification check
@@ -2861,7 +2871,7 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
             guard let self = self else { return }
             let masterNotificationsEnabled = UserDefaults.standard.object(forKey: "masterNotificationsEnabled") as? Bool ?? true
             guard masterNotificationsEnabled else { return }
-            if case .displayChange = type, self.store.welcomeNotchPillEnabled {
+            if case .displayChange = type, self.isWelcomeNotchPillEnabled {
                 return
             }
             let masterSoundEnabled = UserDefaults.standard.object(forKey: "masterSoundEnabled") as? Bool ?? true
@@ -2904,7 +2914,7 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
                         guard type == .fullRestore,
                               let layoutID,
                               !layoutID.isEmpty,
-                              self.store.welcomeNotchPillEnabled else { return false }
+                              self.isWelcomeNotchPillEnabled else { return false }
                         if let helloPillEligibility {
                             return helloPillEligibility
                         }
@@ -6072,10 +6082,10 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
         }
     }
 
-    /// Reassigns the value-type store so views observing `store` are notified
-    /// immediately when this setting changes.
+    /// Reassigns the value-type store so its published Welcome Pill mirror
+    /// and persisted value stay in sync immediately.
     func setWelcomeNotchPillEnabled(_ isEnabled: Bool) {
-        guard store.welcomeNotchPillEnabled != isEnabled else { return }
+        guard isWelcomeNotchPillEnabled != isEnabled else { return }
 
         var updatedStore = store
         updatedStore.welcomeNotchPillEnabled = isEnabled

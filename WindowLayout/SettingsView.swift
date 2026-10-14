@@ -1050,7 +1050,7 @@ struct SettingsView: View {
 
                 if masterNotificationsEnabled {
                     // ── Notch Notification Nav Row ──────────────────────────────
-                    let displayChangeSuppressed = manager.store.welcomeNotchPillEnabled
+                    let displayChangeSuppressed = manager.isWelcomeNotchPillEnabled
                     let notchActiveCount = (manager.store.notchNotifyOnFullRestore ? 1 : 0) +
                                           (manager.store.notchNotifyOnSingleRestore ? 1 : 0) +
                                           (manager.store.notchNotifyOnDisplayChange && !displayChangeSuppressed ? 1 : 0) +
@@ -3432,7 +3432,7 @@ struct NotificationChannelDetailView: View {
                 eventType: .fullRestore,
                 isWelcomeNotchPill: true,
                 isOn: Binding(
-                    get: { manager.store.welcomeNotchPillEnabled },
+                    get: { manager.isWelcomeNotchPillEnabled },
                     set: { isEnabled in
                         manager.setWelcomeNotchPillEnabled(isEnabled)
                     }
@@ -3627,7 +3627,7 @@ private struct EventCardView: View {
         case .fullRestore:
             if channel == .notch {
                 return manager.store.notchSoundOnFullRestore ||
-                    (manager.store.welcomeNotchPillEnabled && manager.store.welcomeNotchPillSoundEnabled)
+                    (manager.isWelcomeNotchPillEnabled && manager.store.welcomeNotchPillSoundEnabled)
             }
             return manager.store.systemSoundOnFullRestore
         case .singleRestore:
@@ -3660,7 +3660,7 @@ private struct EventCardView: View {
     }
 
     private var welcomePillDisablesDisplayChange: Bool {
-        eventType == .displayChange && manager.store.welcomeNotchPillEnabled
+        eventType == .displayChange && manager.isWelcomeNotchPillEnabled
     }
 
     private var isEffectivelyDisabled: Bool {
@@ -3718,7 +3718,7 @@ private struct EventCardView: View {
         if !isWelcomeNotchPill,
            eventType == .fullRestore,
            channel == .notch,
-           manager.store.welcomeNotchPillEnabled,
+           manager.isWelcomeNotchPillEnabled,
            manager.store.welcomeNotchPillSoundEnabled {
             manager.store.welcomeNotchPillSoundEnabled = false
             manager.persist()
@@ -3731,7 +3731,7 @@ private struct EventCardView: View {
 
     private var conflictingCardTarget: NotificationCardTarget {
         if otherChannel == .notch,
-           manager.store.welcomeNotchPillEnabled,
+           manager.isWelcomeNotchPillEnabled,
            manager.store.welcomeNotchPillSoundEnabled,
            !manager.store.notchSoundOnFullRestore,
            case .fullRestore = eventType {
