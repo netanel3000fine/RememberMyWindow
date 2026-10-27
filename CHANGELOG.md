@@ -2,6 +2,17 @@
 
 All notable changes to RememberMyWindows will be documented here.
 
+## [v15.7] — 2026-10-27
+
+### 🪟 "Per-App Layout Memory & Smarter Window Restores"
+
+#### 🧩 Per-App, Per-Display Defaults
+- **Remembered layouts** — Auto Layout now keeps a persistent default for each app on each display and applies it when the app opens while Auto Layout is active.
+- **Seamless upgrade** — Existing captures seed these defaults automatically, carrying forward layouts already recorded.
+
+#### 🎯 More Reliable Window Identity
+- **Better restore matching** — Improved window identity matching and full-screen Space handling make restores more reliable and prevent returning windows from being misread as newly opened.
+
 ## [v15.6.1] — 2026-10-26
 
 ### 🎯 "More Accurate Auto Layout Change Indicators"

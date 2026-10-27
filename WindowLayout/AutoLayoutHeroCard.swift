@@ -1,6 +1,159 @@
 import SwiftUI
 import AppKit
 
+fileprivate struct AutoLayoutRecordMatches {
+    let olderIndexByCurrentIndex: [Int: Int]
+    let unmatchedCurrentIndices: [Int]
+}
+
+/// CG window numbers identify a live window, not a permanent identity. Window
+/// Server can replace or recycle one while an app moves between Spaces, so a
+/// match must also stay within the same app and fall back to stable window
+/// details before a changed number is treated as a launch.
+fileprivate enum AutoLayoutRecordMatcher {
+    private struct CGWindowKey: Hashable {
+        let bundleID: String
+        let windowID: CGWindowID
+    }
+
+    static func match(current: [WindowRecord], older: [WindowRecord]) -> AutoLayoutRecordMatches {
+        var unmatchedCurrent = Set(current.indices)
+        var unmatchedOlder = Set(older.indices)
+        var olderIndexByCurrentIndex: [Int: Int] = [:]
+
+        func pair(_ currentIndex: Int, with olderIndex: Int) {
+            olderIndexByCurrentIndex[currentIndex] = olderIndex
+            unmatchedCurrent.remove(currentIndex)
+            unmatchedOlder.remove(olderIndex)
+        }
+
+        func bestOlderIndex(for currentIndex: Int,
+                            matching predicate: (WindowRecord, WindowRecord) -> Bool) -> Int? {
+            let currentRecord = current[currentIndex]
+            let candidates = unmatchedOlder
+                .filter { predicate(currentRecord, older[$0]) }
+                .sorted()
+            return candidates.min { lhs, rhs in
+                let lhsDistance = geometryDistance(currentRecord, older[lhs])
+                let rhsDistance = geometryDistance(currentRecord, older[rhs])
+                return lhsDistance == rhsDistance ? lhs < rhs : lhsDistance < rhsDistance
+            }
+        }
+
+        // Exact IDs are the strongest match, but only inside the owning app:
+        // WindowServer may recycle an ID after an app's window disappears.
+        var olderByCGWindowID: [CGWindowKey: [Int]] = [:]
+        for olderIndex in older.indices {
+            guard let windowID = older[olderIndex].cgWindowID else { continue }
+            let key = CGWindowKey(bundleID: older[olderIndex].windowID.appBundleID,
+                                  windowID: windowID)
+            olderByCGWindowID[key, default: []].append(olderIndex)
+        }
+        for currentIndex in current.indices {
+            guard let windowID = current[currentIndex].cgWindowID else { continue }
+            let key = CGWindowKey(bundleID: current[currentIndex].windowID.appBundleID,
+                                  windowID: windowID)
+            guard let olderIndex = olderByCGWindowID[key]?.first(where: { unmatchedOlder.contains($0) }) else {
+                continue
+            }
+            pair(currentIndex, with: olderIndex)
+        }
+
+        // Titles survive most Space transitions and disambiguate multiple
+        // windows belonging to one app. Empty titles are common without Screen
+        // Recording permission, so they are handled by the index/geometry passes.
+        for currentIndex in current.indices where unmatchedCurrent.contains(currentIndex) {
+            let currentRecord = current[currentIndex]
+            guard !currentRecord.windowID.windowTitle.isEmpty,
+                  let olderIndex = bestOlderIndex(for: currentIndex, matching: { currentRecord, olderRecord in
+                      currentRecord.windowID.appBundleID == olderRecord.windowID.appBundleID
+                          && currentRecord.windowID.windowTitle == olderRecord.windowID.windowTitle
+                  }) else { continue }
+            pair(currentIndex, with: olderIndex)
+        }
+
+        // App-local indices are the next-best identity when a CG ID changes.
+        for currentIndex in current.indices where unmatchedCurrent.contains(currentIndex) {
+            let currentRecord = current[currentIndex]
+            guard let olderIndex = bestOlderIndex(for: currentIndex, matching: { currentRecord, olderRecord in
+                currentRecord.windowID.appBundleID == olderRecord.windowID.appBundleID
+                    && currentRecord.windowID.appWindowIndex == olderRecord.windowID.appWindowIndex
+            }) else { continue }
+            pair(currentIndex, with: olderIndex)
+        }
+
+        // If IDs and ordering both changed during a Space transition, preserve
+        // continuity by pairing remaining records from the same app by nearest
+        // geometry. Pair only as many as existed before; any surplus current
+        // records are genuine count increases and remain marked as additions.
+        let bundleIDs = Set(unmatchedCurrent.map { current[$0].windowID.appBundleID }).sorted()
+        for bundleID in bundleIDs {
+            var currentIndices = unmatchedCurrent
+                .filter { current[$0].windowID.appBundleID == bundleID }
+                .sorted()
+            var olderIndices = unmatchedOlder
+                .filter { older[$0].windowID.appBundleID == bundleID }
+                .sorted()
+
+            while !currentIndices.isEmpty && !olderIndices.isEmpty {
+                var bestPair: (currentIndex: Int, olderIndex: Int, distance: CGFloat)?
+                for currentIndex in currentIndices {
+                    for olderIndex in olderIndices {
+                        let distance = geometryDistance(current[currentIndex], older[olderIndex])
+                        if bestPair == nil || distance < bestPair!.distance {
+                            bestPair = (currentIndex, olderIndex, distance)
+                        }
+                    }
+                }
+                guard let bestPair else { break }
+                pair(bestPair.currentIndex, with: bestPair.olderIndex)
+                currentIndices.removeAll { $0 == bestPair.currentIndex }
+                olderIndices.removeAll { $0 == bestPair.olderIndex }
+            }
+        }
+
+        return AutoLayoutRecordMatches(
+            olderIndexByCurrentIndex: olderIndexByCurrentIndex,
+            unmatchedCurrentIndices: current.indices.filter { unmatchedCurrent.contains($0) }
+        )
+    }
+
+    /// Returns true if an unmatched window was already present at the exact same coordinates
+    /// in recent history, indicating it returned from another Space rather than being newly launched.
+    static func isReturningUnchangedWindow(
+        _ record: WindowRecord,
+        recentHistory: [[WindowRecord]],
+        tolerance: CGFloat = 2
+    ) -> Bool {
+        for pastRecords in recentHistory {
+            for past in pastRecords {
+                guard past.windowID.appBundleID == record.windowID.appBundleID else { continue }
+                let matchesID = (record.cgWindowID != nil && past.cgWindowID == record.cgWindowID)
+                    || (!record.windowID.windowTitle.isEmpty && past.windowID.windowTitle == record.windowID.windowTitle)
+                    || (past.windowID.appWindowIndex == record.windowID.appWindowIndex)
+                guard matchesID else { continue }
+                let sameFrame = abs(past.globalFrame.origin.x - record.globalFrame.origin.x) <= tolerance
+                    && abs(past.globalFrame.origin.y - record.globalFrame.origin.y) <= tolerance
+                    && abs(past.globalFrame.width - record.globalFrame.width) <= tolerance
+                    && abs(past.globalFrame.height - record.globalFrame.height) <= tolerance
+                let sameFS = past.isFullScreenMode == record.isFullScreenMode
+                    && past.isNativeFullScreen == record.isNativeFullScreen
+                if sameFrame && sameFS {
+                    return true
+                }
+            }
+        }
+        return false
+    }
+
+    private static func geometryDistance(_ lhs: WindowRecord, _ rhs: WindowRecord) -> CGFloat {
+        abs(lhs.globalFrame.origin.x - rhs.globalFrame.origin.x)
+            + abs(lhs.globalFrame.origin.y - rhs.globalFrame.origin.y)
+            + abs(lhs.globalFrame.width - rhs.globalFrame.width)
+            + abs(lhs.globalFrame.height - rhs.globalFrame.height)
+    }
+}
+
 enum AutoLayoutCaptureIndicator: Equatable {
     case sameWindowCount
     case addedWindows(Int)
@@ -23,19 +176,25 @@ enum AutoLayoutCaptureIndicator: Equatable {
 
     static func classify(
         current: [WindowRecord],
-        comparedTo older: [WindowRecord]?
+        comparedTo older: [WindowRecord]?,
+        recentHistory: [[WindowRecord]] = []
     ) -> (indicator: AutoLayoutCaptureIndicator, activityApps: [AutoLayoutCaptureAppIcon]) {
         guard let older else {
             // Strictly reserved for the baseline/oldest item at the last place of the list for aesthetic looks
             return (.history, [])
         }
-        let added = AutoLayoutCaptureAppIcon.addedApps(older: older, current: current)
-        if !added.isEmpty {
-            let count = max(1, current.count > older.count ? (current.count - older.count) : added.count)
-            return (.addedWindows(count), added)
+        let matches = AutoLayoutRecordMatcher.match(current: current, older: older)
+        let genuinelyAddedIndices = matches.unmatchedCurrentIndices.filter { currentIndex in
+            !AutoLayoutRecordMatcher.isReturningUnchangedWindow(current[currentIndex], recentHistory: recentHistory)
         }
-        // Check if any window actually moved or resized
-        let moved = AutoLayoutCaptureAppIcon.movedApps(older: older, current: current)
+        if !genuinelyAddedIndices.isEmpty {
+            let added = AutoLayoutCaptureAppIcon.apps(in: current, at: genuinelyAddedIndices)
+            return (.addedWindows(genuinelyAddedIndices.count), added)
+        }
+        // Check if any window moved, resized, or changed full-screen state.
+        let moved = AutoLayoutCaptureAppIcon.movedApps(current: current,
+                                                     older: older,
+                                                     matches: matches)
         if !moved.isEmpty {
             return (.sameWindowCount, moved)
         }
@@ -54,79 +213,42 @@ enum AutoLayoutCaptureIndicator: Equatable {
         return .sameWindowCount
     }
 
-    /// Returns the exact UUIDs of the windows that were newly added or whose frames moved.
+    /// Returns the exact UUIDs of windows that were added or whose frame/full-screen state changed.
     static func changedRecordIDs(
         current: [WindowRecord],
-        comparedTo older: [WindowRecord]?
+        comparedTo older: [WindowRecord]?,
+        recentHistory: [[WindowRecord]] = []
     ) -> Set<UUID> {
         guard let older else { return [] }
 
+        let matches = AutoLayoutRecordMatcher.match(current: current, older: older)
         var changedIDs = Set<UUID>()
 
-        let olderCGIDs = Set(older.compactMap(\.cgWindowID))
-        let olderCounts = Dictionary(grouping: older, by: { $0.windowID.appBundleID }).mapValues(\.count)
-        let currentCounts = Dictionary(grouping: current, by: { $0.windowID.appBundleID }).mapValues(\.count)
-
-        for record in current {
-            let bundleID = record.windowID.appBundleID
-            let isCountIncreased = (currentCounts[bundleID] ?? 0) > (olderCounts[bundleID] ?? 0)
-            let isNewCGID = record.cgWindowID.map { !olderCGIDs.contains($0) } ?? false
-            guard isCountIncreased || isNewCGID else { continue }
-
-            if let cgid = record.cgWindowID {
-                if !olderCGIDs.contains(cgid) {
-                    changedIDs.insert(record.id)
-                }
-            } else {
-                changedIDs.insert(record.id)
-            }
+        let genuinelyAddedIndices = matches.unmatchedCurrentIndices.filter { currentIndex in
+            !AutoLayoutRecordMatcher.isReturningUnchangedWindow(current[currentIndex], recentHistory: recentHistory)
         }
 
-        if !changedIDs.isEmpty {
-            return changedIDs
+        for currentIndex in genuinelyAddedIndices {
+            changedIDs.insert(current[currentIndex].id)
         }
-
-        // Match by CGWindowID first, then by a stable app/title or app/index key.
-        var olderByCGID: [CGWindowID: WindowRecord] = [:]
-        var olderByKey: [String: WindowRecord] = [:]
-        for record in older {
-            if let cgid = record.cgWindowID {
-                olderByCGID[cgid] = record
-            }
-            let key = "\(record.windowID.appBundleID)_\(record.windowID.appWindowIndex)"
-            olderByKey[key] = record
-            if !record.windowID.windowTitle.isEmpty {
-                olderByKey["\(record.windowID.appBundleID)_\(record.windowID.windowTitle)"] = record
-            }
-        }
-
-        let tolerance: CGFloat = 2
-        for record in current {
-            let olderRecord: WindowRecord? = {
-                if let cgid = record.cgWindowID, let match = olderByCGID[cgid] {
-                    return match
-                }
-                if !record.windowID.windowTitle.isEmpty,
-                   let match = olderByKey["\(record.windowID.appBundleID)_\(record.windowID.windowTitle)"] {
-                    return match
-                }
-                if let match = olderByKey["\(record.windowID.appBundleID)_\(record.windowID.appWindowIndex)"] {
-                    return match
-                }
-                return older.first(where: { $0.windowID.appBundleID == record.windowID.appBundleID })
-            }()
-
-            guard let olderRecord else { continue }
-            let moved = abs(record.globalFrame.origin.x - olderRecord.globalFrame.origin.x) > tolerance
-                || abs(record.globalFrame.origin.y - olderRecord.globalFrame.origin.y) > tolerance
-                || abs(record.globalFrame.width - olderRecord.globalFrame.width) > tolerance
-                || abs(record.globalFrame.height - olderRecord.globalFrame.height) > tolerance
-            if moved {
-                changedIDs.insert(record.id)
+        for (currentIndex, olderIndex) in matches.olderIndexByCurrentIndex {
+            if hasGeometryOrFullScreenChange(current[currentIndex], comparedTo: older[olderIndex]) {
+                changedIDs.insert(current[currentIndex].id)
             }
         }
 
         return changedIDs
+    }
+
+    fileprivate static func hasGeometryOrFullScreenChange(_ record: WindowRecord,
+                                                           comparedTo olderRecord: WindowRecord,
+                                                           tolerance: CGFloat = 2) -> Bool {
+        record.isFullScreenMode != olderRecord.isFullScreenMode
+            || record.isNativeFullScreen != olderRecord.isNativeFullScreen
+            || abs(record.globalFrame.origin.x - olderRecord.globalFrame.origin.x) > tolerance
+            || abs(record.globalFrame.origin.y - olderRecord.globalFrame.origin.y) > tolerance
+            || abs(record.globalFrame.width - olderRecord.globalFrame.width) > tolerance
+            || abs(record.globalFrame.height - olderRecord.globalFrame.height) > tolerance
     }
 }
 
@@ -146,78 +268,46 @@ struct AutoLayoutCaptureAppIcon: Identifiable {
         return appName
     }
 
-    /// Apps whose window count increased between two same-display captures or which are newly present.
-    static func addedApps(older: [WindowRecord]?, current: [WindowRecord]) -> [AutoLayoutCaptureAppIcon] {
-        guard let older else { return [] }
-
-        let olderCounts = Dictionary(grouping: older, by: { $0.windowID.appBundleID }).mapValues(\.count)
-        let currentCounts = Dictionary(grouping: current, by: { $0.windowID.appBundleID }).mapValues(\.count)
-        let olderCGIDs = Set(older.compactMap(\.cgWindowID))
-        var changedApps: [(bundleID: String, appName: String?)] = []
-
-        for record in current {
-            let bundleID = record.windowID.appBundleID
-            let isCountIncreased = (currentCounts[bundleID] ?? 0) > (olderCounts[bundleID] ?? 0)
-            let isNewCGID = record.cgWindowID.map { !olderCGIDs.contains($0) } ?? false
-            guard (isCountIncreased || isNewCGID),
-                  !changedApps.contains(where: { $0.bundleID == bundleID }) else {
-                continue
-            }
-            changedApps.append((bundleID, record.windowID.appName))
-        }
-
-        return resolve(changedApps)
-    }
-
-    /// Apps with windows whose geometry changed between two captures.
+    /// Apps with matched windows whose geometry or full-screen state changed between captures.
     static func movedApps(
         older: [WindowRecord]?,
         current: [WindowRecord],
         tolerance: CGFloat = 2
     ) -> [AutoLayoutCaptureAppIcon] {
         guard let older else { return [] }
+        let matches = AutoLayoutRecordMatcher.match(current: current, older: older)
+        return movedApps(current: current, older: older, matches: matches, tolerance: tolerance)
+    }
 
-        // Match by CGWindowID first, then by a stable app/title or app/index key.
-        var olderByCGID: [CGWindowID: WindowRecord] = [:]
-        var olderByKey: [String: WindowRecord] = [:]
-        for record in older {
-            if let cgid = record.cgWindowID {
-                olderByCGID[cgid] = record
-            }
-            let key = "\(record.windowID.appBundleID)_\(record.windowID.appWindowIndex)"
-            olderByKey[key] = record
-            if !record.windowID.windowTitle.isEmpty {
-                olderByKey["\(record.windowID.appBundleID)_\(record.windowID.windowTitle)"] = record
-            }
-        }
-
+    fileprivate static func movedApps(current: [WindowRecord],
+                                      older: [WindowRecord],
+                                      matches: AutoLayoutRecordMatches,
+                                      tolerance: CGFloat = 2) -> [AutoLayoutCaptureAppIcon] {
         var changedApps: [(bundleID: String, appName: String?)] = []
-        for record in current {
-            let olderRecord: WindowRecord? = {
-                if let cgid = record.cgWindowID, let match = olderByCGID[cgid] {
-                    return match
-                }
-                if !record.windowID.windowTitle.isEmpty,
-                   let match = olderByKey["\(record.windowID.appBundleID)_\(record.windowID.windowTitle)"] {
-                    return match
-                }
-                if let match = olderByKey["\(record.windowID.appBundleID)_\(record.windowID.appWindowIndex)"] {
-                    return match
-                }
-                return older.first(where: { $0.windowID.appBundleID == record.windowID.appBundleID })
-            }()
-
-            guard let olderRecord else { continue }
-            let moved = abs(record.globalFrame.origin.x - olderRecord.globalFrame.origin.x) > tolerance
-                || abs(record.globalFrame.origin.y - olderRecord.globalFrame.origin.y) > tolerance
-                || abs(record.globalFrame.width - olderRecord.globalFrame.width) > tolerance
-                || abs(record.globalFrame.height - olderRecord.globalFrame.height) > tolerance
+        for (currentIndex, olderIndex) in matches.olderIndexByCurrentIndex.sorted(by: { $0.key < $1.key }) {
+            let record = current[currentIndex]
+            guard AutoLayoutCaptureIndicator.hasGeometryOrFullScreenChange(
+                record,
+                comparedTo: older[olderIndex],
+                tolerance: tolerance
+            ) else { continue }
             let bundleID = record.windowID.appBundleID
-            if moved && !changedApps.contains(where: { $0.bundleID == bundleID }) {
+            if !changedApps.contains(where: { $0.bundleID == bundleID }) {
                 changedApps.append((bundleID, record.windowID.appName))
             }
         }
+        return resolve(changedApps)
+    }
 
+    fileprivate static func apps(in records: [WindowRecord], at indices: [Int]) -> [AutoLayoutCaptureAppIcon] {
+        var changedApps: [(bundleID: String, appName: String?)] = []
+        for index in indices {
+            let record = records[index]
+            let bundleID = record.windowID.appBundleID
+            if !changedApps.contains(where: { $0.bundleID == bundleID }) {
+                changedApps.append((bundleID, record.windowID.appName))
+            }
+        }
         return resolve(changedApps)
     }
 
@@ -253,14 +343,18 @@ struct AutoLayoutCapturePresentation: Identifiable {
         let displayEntries = entries.filter { $0.screenKey == displayScreenKey }
 
         return displayEntries.enumerated().map { index, entry in
-            let nextOlder = displayEntries.dropFirst(index + 1).first
+            let remainingEntries = displayEntries.dropFirst(index + 1)
+            let nextOlder = remainingEntries.first
+            let recentHistory = remainingEntries.prefix(5).map(\.records)
             let (indicator, activityApps) = AutoLayoutCaptureIndicator.classify(
                 current: entry.records,
-                comparedTo: nextOlder?.records
+                comparedTo: nextOlder?.records,
+                recentHistory: Array(recentHistory)
             )
             let triggeringRecordIDs = AutoLayoutCaptureIndicator.changedRecordIDs(
                 current: entry.records,
-                comparedTo: nextOlder?.records
+                comparedTo: nextOlder?.records,
+                recentHistory: Array(recentHistory)
             )
 
             return AutoLayoutCapturePresentation(

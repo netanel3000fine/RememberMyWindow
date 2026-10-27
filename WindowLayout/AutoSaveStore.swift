@@ -28,6 +28,19 @@ struct AutoSaveEntry: Codable, Identifiable {
     var previewWindowCount: Int { previewRecords.count }
 }
 
+/// One reusable window template for an app on a particular display setup.
+/// Auto Layout restores this frame to every currently open window of the app;
+/// it does not describe a saved document or an individual window identity.
+struct AppWindowDefault: Codable, Identifiable {
+    let bundleID: String
+    let screenKey: String
+    let readableScreenKey: String?
+    let record: WindowRecord
+    let updatedAt: Date
+
+    var id: String { "\(screenKey)::\(bundleID)" }
+}
+
 struct AutoSaveFile: Codable {
     /// Newest first. This is the recent-capture history, up to
     /// `AutoSaveStore.ringCapacity` captures per screen configuration.
@@ -41,15 +54,19 @@ struct AutoSaveFile: Codable {
     var lastKnown: [WindowRecord] = []
     /// Pinned frontmost app bundle ID per screen configuration.
     var foregroundAppByScreenKey: [String: String] = [:]
+    /// One default window template per app and display configuration.
+    var appWindowDefaults: [AppWindowDefault] = []
 
     init(entries: [AutoSaveEntry] = [],
          displayEntries: [AutoSaveEntry] = [],
          lastKnown: [WindowRecord] = [],
-         foregroundAppByScreenKey: [String: String] = [:]) {
+         foregroundAppByScreenKey: [String: String] = [:],
+         appWindowDefaults: [AppWindowDefault] = []) {
         self.entries = entries
         self.displayEntries = displayEntries
         self.lastKnown = lastKnown
         self.foregroundAppByScreenKey = foregroundAppByScreenKey
+        self.appWindowDefaults = appWindowDefaults
     }
 
     /// Written by hand rather than synthesised, because synthesised decoding
@@ -63,6 +80,7 @@ struct AutoSaveFile: Codable {
         displayEntries = try c.decodeIfPresent([AutoSaveEntry].self, forKey: .displayEntries) ?? []
         lastKnown = try c.decodeIfPresent([WindowRecord].self, forKey: .lastKnown) ?? []
         foregroundAppByScreenKey = try c.decodeIfPresent([String: String].self, forKey: .foregroundAppByScreenKey) ?? [:]
+        appWindowDefaults = try c.decodeIfPresent([AppWindowDefault].self, forKey: .appWindowDefaults) ?? []
     }
 }
 
@@ -142,6 +160,8 @@ final class AutoSaveStore: ObservableObject {
     /// of one record per moment. It is scoped by screen fingerprint, because a
     /// frame from another display setup is not an answer.
     @Published private(set) var lastKnown: [WindowRecord] = []
+    /// Latest default frame and full-screen state for each app/display pair.
+    @Published private(set) var appWindowDefaults: [AppWindowDefault] = []
     /// Pinned frontmost app bundle ID per screen configuration.
     @Published private(set) var foregroundAppByScreenKey: [String: String] = [:]
     /// Set when the file existed but could not be read. Writing is refused
@@ -215,6 +235,103 @@ final class AutoSaveStore: ObservableObject {
         write()
     }
 
+    /// Returns the saved frame template for one app on one display setup.
+    func appWindowDefault(forBundleID bundleID: String, screenKey: String) -> WindowRecord? {
+        appWindowDefaults.first {
+            $0.bundleID == bundleID && $0.screenKey == screenKey
+        }?.record ?? appWindowDefaults.first {
+            $0.screenKey == screenKey && $0.record.windowID.appName == bundleID
+        }?.record
+    }
+
+    /// Seeds missing app defaults from the first observed window of each app.
+    /// The caller passes records in its known opening order; on the first
+    /// capture that is the capture order, which is the safe fallback when the
+    /// app was already open before tracking began.
+    func seedAppWindowDefaults(from records: [WindowRecord],
+                               screenKey: String,
+                               readableScreenKey: String?) {
+        var seenBundleIDs = Set<String>()
+        var changed = false
+        for record in records where seenBundleIDs.insert(record.windowID.appBundleID).inserted {
+            changed = upsertAppWindowDefault(from: record,
+                                             screenKey: screenKey,
+                                             readableScreenKey: readableScreenKey,
+                                             onlyIfMissing: true) || changed
+        }
+        guard changed else { return }
+        appWindowDefaults.sort { $0.updatedAt > $1.updatedAt }
+        appWindowDefaultsIsDirty = true
+        flush()
+    }
+
+    /// Makes a closed window's last known frame the app's next default.
+    func rememberClosedWindowAsDefault(_ record: WindowRecord,
+                                       screenKey: String,
+                                       readableScreenKey: String?) {
+        guard upsertAppWindowDefault(from: record,
+                                     screenKey: screenKey,
+                                     readableScreenKey: readableScreenKey,
+                                     onlyIfMissing: false) else { return }
+        appWindowDefaults.sort { $0.updatedAt > $1.updatedAt }
+        appWindowDefaultsIsDirty = true
+        // A close is the event that chooses the next default, so persist it
+        // immediately rather than leaving it behind the long capture interval.
+        flush()
+    }
+
+    @discardableResult
+    private func upsertAppWindowDefault(from source: WindowRecord,
+                                        screenKey: String,
+                                        readableScreenKey: String?,
+                                        onlyIfMissing: Bool,
+                                        now: Date = Date()) -> Bool {
+        let bundleID = source.windowID.appBundleID
+        let existingIndex = appWindowDefaults.firstIndex {
+            $0.bundleID == bundleID && $0.screenKey == screenKey
+        }
+        if onlyIfMissing, existingIndex != nil { return false }
+
+        // A default is a template, not an identity for the closed window.
+        // Clearing its CG ID and title prevents a recycled system window ID or
+        // an old document title from steering a future restore to the wrong
+        // window. The first live window is used as the template target.
+        let template = WindowRecord(
+            id: source.id,
+            windowID: WindowID(appBundleID: bundleID,
+                               appName: source.windowID.appName ?? bundleID,
+                               windowTitle: "",
+                               appWindowIndex: 0),
+            cgWindowID: nil,
+            globalFrame: source.globalFrame,
+            screenKey: screenKey,
+            screenFrame: source.screenFrame,
+            screenName: source.screenName,
+            savedAt: now,
+            zIndex: 0,
+            isFullScreenMode: source.isFullScreenMode,
+            isNativeFullScreen: source.isNativeFullScreen
+        )
+
+        if let existingIndex,
+           Self.recordsMatchGeometry([appWindowDefaults[existingIndex].record], [template]),
+           appWindowDefaults[existingIndex].record.isNativeFullScreen == template.isNativeFullScreen {
+            return false
+        }
+
+        let value = AppWindowDefault(bundleID: bundleID,
+                                     screenKey: screenKey,
+                                     readableScreenKey: readableScreenKey,
+                                     record: template,
+                                     updatedAt: now)
+        if let existingIndex {
+            appWindowDefaults[existingIndex] = value
+        } else {
+            appWindowDefaults.append(value)
+        }
+        return true
+    }
+
     private let fileURL: URL
     private var pending: AutoSaveEntry?
     private var lastWrite: Date?
@@ -226,6 +343,7 @@ final class AutoSaveStore: ObservableObject {
     /// Set when an older file was hydrated with per-display entries, or when a
     /// display entry is replaced during a flush.
     private var displayEntriesIsDirty = false
+    private var appWindowDefaultsIsDirty = false
     private var log: (String) -> Void
 
     init(directory: URL, log: @escaping (String) -> Void = { _ in }) {
@@ -236,7 +354,8 @@ final class AutoSaveStore: ObservableObject {
 
     // MARK: - Recording
 
-    /// Compares two sets of window records for layout equality (same count, same bundle IDs, and matching frames within tolerance).
+    /// Compares two sets of window records for layout equality (same count, app IDs,
+    /// full-screen state, and matching frames within tolerance).
     /// Focus order/zIndex is intentionally ignored so active window switches do not create duplicate captures.
     private static func recordsMatchGeometry(_ lhs: [WindowRecord], _ rhs: [WindowRecord], tolerance: CGFloat = 2) -> Bool {
         guard lhs.count == rhs.count else { return false }
@@ -245,6 +364,7 @@ final class AutoSaveStore: ObservableObject {
             guard let matchIndex = unmatchedRHS.firstIndex(where: { right in
                 left.windowID.appBundleID == right.windowID.appBundleID &&
                 left.isFullScreenMode == right.isFullScreenMode &&
+                left.isNativeFullScreen == right.isNativeFullScreen &&
                 abs(left.globalFrame.origin.x - right.globalFrame.origin.x) <= tolerance &&
                 abs(left.globalFrame.origin.y - right.globalFrame.origin.y) <= tolerance &&
                 abs(left.globalFrame.width - right.globalFrame.width) <= tolerance &&
@@ -268,6 +388,7 @@ final class AutoSaveStore: ObservableObject {
             if let matchIndex = unmatchedRHS.firstIndex(where: { right in
                 left.windowID.appBundleID == right.windowID.appBundleID &&
                 left.isFullScreenMode == right.isFullScreenMode &&
+                left.isNativeFullScreen == right.isNativeFullScreen &&
                 abs(left.globalFrame.origin.x - right.globalFrame.origin.x) <= tolerance &&
                 abs(left.globalFrame.origin.y - right.globalFrame.origin.y) <= tolerance &&
                 abs(left.globalFrame.width - right.globalFrame.width) <= tolerance &&
@@ -289,6 +410,9 @@ final class AutoSaveStore: ObservableObject {
                     if left.isFullScreenMode != closest.isFullScreenMode {
                         reasons.append("isFullScreenMode (\(left.isFullScreenMode) vs \(closest.isFullScreenMode))")
                     }
+                    if left.isNativeFullScreen != closest.isNativeFullScreen {
+                        reasons.append("isNativeFullScreen (\(left.isNativeFullScreen) vs \(closest.isNativeFullScreen))")
+                    }
                     diffs.append("\(app): [\(reasons.joined(separator: ", "))]")
                     unmatchedRHS.removeAll(where: { $0.id == closest.id })
                 } else {
@@ -309,6 +433,7 @@ final class AutoSaveStore: ObservableObject {
             guard let matchIndex = unmatchedSuperset.firstIndex(where: { sup in
                 sub.windowID.appBundleID == sup.windowID.appBundleID &&
                 sub.isFullScreenMode == sup.isFullScreenMode &&
+                sub.isNativeFullScreen == sup.isNativeFullScreen &&
                 abs(sub.globalFrame.origin.x - sup.globalFrame.origin.x) <= tolerance &&
                 abs(sub.globalFrame.origin.y - sup.globalFrame.origin.y) <= tolerance &&
                 abs(sub.globalFrame.width - sup.globalFrame.width) <= tolerance &&
@@ -466,7 +591,7 @@ final class AutoSaveStore: ObservableObject {
     /// Writes now if the coalescing interval has run out, otherwise arms the
     /// trailing timer so it is written when it does.
     private func scheduleWrite(now: Date, force: Bool) {
-        guard pending != nil || lastKnownIsDirty || displayEntriesIsDirty else { return }
+        guard pending != nil || lastKnownIsDirty || displayEntriesIsDirty || appWindowDefaultsIsDirty else { return }
         if force || lastWrite == nil || now.timeIntervalSince(lastWrite!) >= Self.coalescingInterval {
             flush(now: now)
         } else {
@@ -487,7 +612,9 @@ final class AutoSaveStore: ObservableObject {
         for record in records {
             if let existing = byID[record.windowID],
                existing.globalFrame == record.globalFrame,
-               existing.screenKey == record.screenKey {
+               existing.screenKey == record.screenKey,
+               existing.isFullScreenMode == record.isFullScreenMode,
+               existing.isNativeFullScreen == record.isNativeFullScreen {
                 continue
             }
             byID[record.windowID] = record
@@ -533,7 +660,7 @@ final class AutoSaveStore: ObservableObject {
     func flush(now: Date = Date()) {
         trailingTimer?.invalidate()
         trailingTimer = nil
-        guard pending != nil || lastKnownIsDirty || displayEntriesIsDirty else { return }
+        guard pending != nil || lastKnownIsDirty || displayEntriesIsDirty || appWindowDefaultsIsDirty else { return }
         guard !isUnreadable else {
             log("auto-save: refusing to write over a file that could not be read")
             return
@@ -571,6 +698,7 @@ final class AutoSaveStore: ObservableObject {
         }
         lastKnownIsDirty = false
         displayEntriesIsDirty = false
+        appWindowDefaultsIsDirty = false
         lastWrite = now
         write()
     }
@@ -618,9 +746,10 @@ final class AutoSaveStore: ObservableObject {
             let data = try JSONEncoder().encode(AutoSaveFile(entries: entries,
                                                              displayEntries: displayEntries,
                                                              lastKnown: lastKnown,
-                                                             foregroundAppByScreenKey: foregroundAppByScreenKey))
+                                                             foregroundAppByScreenKey: foregroundAppByScreenKey,
+                                                             appWindowDefaults: appWindowDefaults))
             try data.write(to: fileURL, options: .atomic)
-            log("auto-save: wrote \(entries.first?.windowCount ?? 0) window(s), \(entries.count) in ring, \(displayEntries.count) display configuration(s), \(lastKnown.count) remembered")
+            log("auto-save: wrote \(entries.first?.windowCount ?? 0) window(s), \(entries.count) in ring, \(displayEntries.count) display configuration(s), \(lastKnown.count) remembered, \(appWindowDefaults.count) app default(s)")
         } catch {
             log("auto-save: write failed — \(error.localizedDescription)")
         }
@@ -668,6 +797,7 @@ final class AutoSaveStore: ObservableObject {
             entries = deduplicatedEntries
             lastKnown = file.lastKnown
             foregroundAppByScreenKey = file.foregroundAppByScreenKey
+            appWindowDefaults = file.appWindowDefaults
 
             // Files written before per-display retention only have the recent
             // ring. Merge it with the new field, then recover configurations
@@ -691,6 +821,25 @@ final class AutoSaveStore: ObservableObject {
             displayEntries = hydrated.sorted { $0.capturedAt > $1.capturedAt }
             displayEntriesIsDirty = Set(file.displayEntries.map(\.id)) != Set(displayEntries.map(\.id))
 
+            // Older files have no app templates. Recover one from the first
+            // captured window for each app/display pair so an upgrade keeps
+            // restoring automatically instead of starting with an empty map.
+            var migratedDefaults = 0
+            for entry in displayEntries {
+                var seenBundleIDs = Set<String>()
+                for record in entry.records where seenBundleIDs.insert(record.windowID.appBundleID).inserted {
+                    if upsertAppWindowDefault(from: record,
+                                              screenKey: entry.screenKey,
+                                              readableScreenKey: entry.readableScreenKey,
+                                              onlyIfMissing: true,
+                                              now: entry.capturedAt) {
+                        migratedDefaults += 1
+                    }
+                }
+            }
+            appWindowDefaults.sort { $0.updatedAt > $1.updatedAt }
+            appWindowDefaultsIsDirty = migratedDefaults > 0
+
             // The coalescing floor is a promise about writes to this file, and
             // the file outlives the process. Without this, a relaunch starts
             // with no memory of when it last wrote and flushes on its first
@@ -698,7 +847,11 @@ final class AutoSaveStore: ObservableObject {
             // floor. The file's own modification date is that memory.
             lastWrite = (try? fileURL.resourceValues(forKeys: [.contentModificationDateKey]))?
                 .contentModificationDate
-            log("auto-save: loaded \(entries.count) entr(ies), \(displayEntries.count) display configuration(s), \(lastKnown.count) remembered window(s)")
+            if migratedDefaults > 0 {
+                log("auto-save: migrated \(migratedDefaults) app default(s) from earlier captures")
+                flush()
+            }
+            log("auto-save: loaded \(entries.count) entr(ies), \(displayEntries.count) display configuration(s), \(lastKnown.count) remembered window(s), \(appWindowDefaults.count) app default(s)")
         } catch {
             isUnreadable = true
             log("auto-save: \(fileURL.lastPathComponent) could not be decoded — \(error.localizedDescription)")

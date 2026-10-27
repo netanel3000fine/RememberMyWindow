@@ -619,12 +619,17 @@ struct SettingsView: View {
                         subtitle: "Restores an app's saved window position automatically whenever it is launched",
                         icon: "app.badge.checkmark",
                         isOn: Binding(
-                            get: { manager.store.autoRestoreOnAppOpen },
+                            get: { isAutoLayoutActive || manager.store.autoRestoreOnAppOpen },
                             set: { manager.store.autoRestoreOnAppOpen = $0 }
                         )
                     )
+                    .autoLayoutDisabled(
+                        isAutoLayoutActive,
+                        reason: "Always active while Auto Layout is on",
+                        appLanguage: appLanguage
+                    )
 
-                    if manager.store.autoRestoreOnAppOpen {
+                    if isAutoLayoutActive || manager.store.autoRestoreOnAppOpen {
                         Divider().padding(.horizontal, 12)
 
                         SettingsStepper(
@@ -1464,12 +1469,13 @@ private extension View {
 
     func autoLayoutDisabled(
         _ isDisabled: Bool,
+        reason: String = "Unavailable while Auto Layout is on",
         appLanguage: AppLanguage,
         showsReason: Bool = true
     ) -> some View {
         settingsDisabled(
             isDisabled,
-            reason: "Unavailable while Auto Layout is on",
+            reason: reason,
             appLanguage: appLanguage,
             showsReason: showsReason
         )

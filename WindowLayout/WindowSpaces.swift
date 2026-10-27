@@ -24,11 +24,15 @@ enum WindowSpaces {
 
     private typealias MainConnectionFn = @convention(c) () -> Int32
     private typealias SpacesForWindowsFn = @convention(c) (Int32, Int32, CFArray) -> Unmanaged<CFArray>?
+    private typealias ManagedSpacesFn = @convention(c) (Int32) -> Unmanaged<CFArray>?
+    private typealias GetActiveSpaceFn = @convention(c) (Int32) -> UInt64
+    private typealias GetSpaceTypeFn = @convention(c) (Int32, UInt64) -> Int32
 
     /// `kCGSAllSpacesMask` — the current Space, the others, and full-screen ones.
     /// Asking for a narrower set would make a window on another Space look like
     /// a window on none, which is the exact confusion this file exists to end.
     private static let allSpacesSelector: Int32 = 0x7
+    private static let fullScreenSpaceTypes: Set<Int> = [2, 4]
 
     private struct Resolved {
         let connection: Int32
@@ -52,6 +56,46 @@ enum WindowSpaces {
     /// to their previous behaviour rather than treating every window as a
     /// leftover, which would empty the layout.
     static var isAvailable: Bool { resolved != nil }
+
+    private static func managedDisplaySpaces() -> [[String: Any]]? {
+        guard let r = resolved,
+              let handle = dlopen(nil, RTLD_NOW),
+              let ptr = dlsym(handle, "CGSCopyManagedDisplaySpaces") else { return nil }
+        let fn = unsafeBitCast(ptr, to: ManagedSpacesFn.self)
+        return fn(r.connection)?.takeRetainedValue() as? [[String: Any]]
+    }
+
+    /// The WindowServer type for each known Space ID: 0 is a desktop, 2/4 are
+    /// full-screen app Spaces, and other values are other system Spaces.
+    static func spaceTypesByID() -> [Int: Int]? {
+        guard let displays = managedDisplaySpaces() else { return nil }
+        var types: [Int: Int] = [:]
+
+        func addType(from space: [String: Any]) {
+            guard let id = space["ManagedSpaceID"] as? Int,
+                  let type = space["type"] as? Int else { return }
+            types[id] = type
+        }
+
+        for display in displays {
+            for space in display["Spaces"] as? [[String: Any]] ?? [] {
+                addType(from: space)
+            }
+            if let current = display["Current Space"] as? [String: Any] {
+                addType(from: current)
+            }
+        }
+        return types.isEmpty ? nil : types
+    }
+
+    /// Returns nil when Space-type metadata is unavailable, preserving the
+    /// geometric full-screen fallback used by the capture path.
+    static func fullScreenSpaceIDs() -> Set<Int>? {
+        guard let types = spaceTypesByID() else { return nil }
+        return Set(types.compactMap { id, type in
+            fullScreenSpaceTypes.contains(type) ? id : nil
+        })
+    }
 
     /// The Spaces one window belongs to. Empty means none: it is a leftover.
     ///
@@ -85,12 +129,7 @@ enum WindowSpaces {
     /// is real, and one on the Space in front of the user that the accessibility
     /// tree declined to report, which is not.
     static func currentSpaces() -> Set<Int> {
-        guard let r = resolved,
-              let handle = dlopen(nil, RTLD_NOW),
-              let ptr = dlsym(handle, "CGSCopyManagedDisplaySpaces") else { return [] }
-        typealias ManagedSpacesFn = @convention(c) (Int32) -> Unmanaged<CFArray>?
-        let fn = unsafeBitCast(ptr, to: ManagedSpacesFn.self)
-        guard let displays = fn(r.connection)?.takeRetainedValue() as? [[String: Any]] else { return [] }
+        guard let displays = managedDisplaySpaces() else { return [] }
         var out = Set<Int>()
         for display in displays {
             if let current = display["Current Space"] as? [String: Any],
@@ -116,57 +155,69 @@ enum WindowSpaces {
     /// Returns true if the active space is a standard desktop space (type == 0),
     /// and false if it is a full-screen app space (type 4/2) or another non-desktop space.
     static func isCurrentSpaceDesktop() -> Bool {
-        // Fast-path 1: Check if the frontmost app is in AX full-screen mode
-        if let frontApp = NSWorkspace.shared.frontmostApplication {
-            let appElement = AXUIElementCreateApplication(frontApp.processIdentifier)
-            AXUIElementSetMessagingTimeout(appElement, 0.10)
-            var value: AnyObject?
-            if AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &value) == .success,
-               let windows = value as? [AXUIElement] {
-                for window in windows {
-                    var isFullScreen: AnyObject?
-                    if AXUIElementCopyAttributeValue(window, "AXFullScreen" as CFString, &isFullScreen) == .success,
-                       let fsNumber = isFullScreen as? NSNumber, fsNumber.boolValue {
-                        return false
-                    }
-                }
+        // Prefer the active Space itself. A frontmost app can own a full-screen
+        // window parked elsewhere while the user is back on a desktop Space.
+        if let displays = managedDisplaySpaces() {
+            let currentTypes = displays.compactMap { display -> Int? in
+                (display["Current Space"] as? [String: Any])?["type"] as? Int
             }
+            if currentTypes.contains(where: { $0 != 0 }) { return false }
+            if !currentTypes.isEmpty { return true }
         }
 
-        // Fast-path 2: Query WindowServer via CGSGetActiveSpace & CGSSpaceGetType
-        guard let r = resolved,
-              let handle = dlopen(nil, RTLD_NOW) else { return true }
-        
-        typealias GetActiveSpaceFn = @convention(c) (Int32) -> UInt64
-        typealias GetSpaceTypeFn = @convention(c) (Int32, UInt64) -> Int32
-        if let activePtr = dlsym(handle, "CGSGetActiveSpace"),
-           let typePtr = dlsym(handle, "CGSSpaceGetType") {
-            let getActive = unsafeBitCast(activePtr, to: GetActiveSpaceFn.self)
-            let getType = unsafeBitCast(typePtr, to: GetSpaceTypeFn.self)
-            let activeSpace = getActive(r.connection)
-            let spaceType = getType(r.connection, activeSpace)
-            // Type 0 is standard user desktop. Type 2 and 4 are full-screen app spaces.
-            if spaceType != 0 {
-                return false
-            }
+        // Fallback to WindowServer's active-space type when managed display
+        // metadata does not expose a current type.
+        if let type = activeSpaceType() {
+            return type == 0
         }
 
-        // Fast-path 3: Check Current Space type across displays via CGSCopyManagedDisplaySpaces
-        if let ptr = dlsym(handle, "CGSCopyManagedDisplaySpaces") {
-            typealias ManagedSpacesFn = @convention(c) (Int32) -> Unmanaged<CFArray>?
-            let fn = unsafeBitCast(ptr, to: ManagedSpacesFn.self)
-            if let displays = fn(r.connection)?.takeRetainedValue() as? [[String: Any]] {
-                for display in displays {
-                    if let current = display["Current Space"] as? [String: Any],
-                       let type = current["type"] as? Int, type != 0 {
-                        return false
-                    }
-                }
-            }
+        // Last fallback: an AX full-screen window counts only if that exact
+        // window is on screen now, not merely because the app has one elsewhere.
+        if let frontApp = NSWorkspace.shared.frontmostApplication,
+           hasOnScreenFullScreenAXWindow(for: frontApp) {
+            return false
         }
-
         return true
     }
 
-}
+    private static func activeSpaceType() -> Int? {
+        guard let r = resolved,
+              let handle = dlopen(nil, RTLD_NOW),
+              let activePtr = dlsym(handle, "CGSGetActiveSpace"),
+              let typePtr = dlsym(handle, "CGSSpaceGetType") else { return nil }
+        let getActive = unsafeBitCast(activePtr, to: GetActiveSpaceFn.self)
+        let getType = unsafeBitCast(typePtr, to: GetSpaceTypeFn.self)
+        return Int(getType(r.connection, getActive(r.connection)))
+    }
 
+    private static func hasOnScreenFullScreenAXWindow(for app: NSRunningApplication) -> Bool {
+        guard let windowList = CGWindowListCopyWindowInfo(
+            [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID
+        ) as? [[String: Any]] else { return false }
+
+        let onScreenWindowIDs = Set(windowList.compactMap { entry -> CGWindowID? in
+            guard (entry[kCGWindowOwnerPID as String] as? pid_t) == app.processIdentifier,
+                  (entry[kCGWindowLayer as String] as? Int) == 0 else { return nil }
+            return entry[kCGWindowNumber as String] as? CGWindowID
+        })
+        guard !onScreenWindowIDs.isEmpty else { return false }
+
+        let appElement = AXUIElementCreateApplication(app.processIdentifier)
+        AXUIElementSetMessagingTimeout(appElement, 0.10)
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &value) == .success,
+              let windows = value as? [AXUIElement] else { return false }
+
+        for window in windows {
+            var isFullScreen: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(window, "AXFullScreen" as CFString, &isFullScreen) == .success,
+                  let isFullScreen = isFullScreen as? Bool,
+                  isFullScreen,
+                  let windowID = WindowManager.windowNumber(of: window),
+                  onScreenWindowIDs.contains(windowID) else { continue }
+            return true
+        }
+        return false
+    }
+
+}

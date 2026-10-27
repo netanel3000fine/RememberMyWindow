@@ -38,6 +38,25 @@ private struct DisplayConnectionRestoreRequest {
     let sendsSystemNotification: Bool
 }
 
+private enum AutoLayoutWindowKey: Hashable {
+    case cgWindow(bundleID: String, windowID: CGWindowID)
+    case window(WindowID)
+}
+
+private struct TrackedAutoLayoutWindow {
+    let openingOrder: UInt64
+    var processID: pid_t?
+    var record: WindowRecord
+}
+
+private struct PendingWindowDestruction {
+    let processID: pid_t?
+    let bundleID: String?
+    let cgWindowID: CGWindowID?
+    let title: String?
+    let occurredAt: Date
+}
+
 @MainActor
 final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate, UNUserNotificationCenterDelegate {
 
@@ -119,6 +138,14 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
     private var flushTask: Task<Void, Never>?
     private var trackingTask: Task<Void, Never>?
     private var lastKnownWindows: [WindowID: (frame: CGRect, id: UUID)] = [:]
+    /// Runtime-only open order and latest stable frame for Auto Layout windows.
+    /// CG window IDs keep the order stable even when titles or AX indices change.
+    private var trackedAutoLayoutWindows: [AutoLayoutWindowKey: TrackedAutoLayoutWindow] = [:]
+    private var nextAutoLayoutWindowOpeningOrder: UInt64 = 0
+    private var didInitializeAutoLayoutWindowOrder = false
+    private var pendingAutoLayoutOpeningOrders: [AutoLayoutWindowKey: UInt64] = [:]
+    private var pendingWindowDestructions: [PendingWindowDestruction] = []
+    private var windowDestructionResolutionTask: Task<Void, Never>?
     /// AX observers for event-driven window tracking. Keyed by PID.
     /// Each entry holds the AXObserver and its run-loop source so we can tear it down cleanly.
     private var axObservers: [pid_t: (observer: AXObserver, source: CFRunLoopSource)] = [:]
@@ -442,6 +469,7 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
     func setAutoSaveEnabled(_ enabled: Bool) {
         guard store.autoSaveEnabled != enabled else { return }
 
+        clearAutoLayoutWindowTracking()
         store.autoSaveEnabled = enabled
         selectedSnapshotKey = enabled ? nil : Self.liveKey
         selectedAutoSaveEntryID = nil
@@ -463,6 +491,9 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
         // the previous history and any setup/teardown entry created above so
         // auto-layout captures and session restores do not mix together.
         clearEvents()
+        if enabled, isTracking {
+            scheduleAXEventFlush(delay: 0, urgent: true)
+        }
     }
 
     func startTracking() {
@@ -616,6 +647,9 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
     }
 
     func stopTracking() {
+        if store.autoSaveEnabled, let ownBundleID = Bundle.main.bundleIdentifier {
+            rememberTerminatingAppDefault(bundleID: ownBundleID)
+        }
         // First, before anything is torn down. `applicationWillTerminate` calls
         // this, and the flush observer registered for that same notification is
         // removed a few lines below — during the very post that should trigger
@@ -628,6 +662,10 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
         isTracking = false
         trackingTask?.cancel()
         axEventDebounceTask?.cancel()
+        windowDestructionResolutionTask?.cancel()
+        windowDestructionResolutionTask = nil
+        pendingWindowDestructions.removeAll()
+        clearAutoLayoutWindowTracking()
         isAXFlushScheduled = false
         lastAXCaptureDate = nil
         axIdleCaptureInterval = 2
@@ -1347,10 +1385,12 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
                 s1.frame.intersection(win.appKitFrame).area < s2.frame.intersection(win.appKitFrame).area
             })
             let wid = WindowID(appBundleID: bundleID, appName: appName, windowTitle: win.title, appWindowIndex: idx)
+            let windowNumber = win.windowNumber
+            let cgWindowID = windowNumber > 0 ? CGWindowID(exactly: windowNumber) : nil
             var record = WindowRecord(
                 id: UUID(),
                 windowID: wid,
-                cgWindowID: win.windowNumber != Int.max ? CGWindowID(win.windowNumber) : nil,
+                cgWindowID: cgWindowID,
                 globalFrame: win.appKitFrame,
                 screenKey: fp.key,
                 screenFrame: screen?.frame,
@@ -1439,7 +1479,7 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
             guard let self = self else { return }
             self.observeApp(app)
 
-            let canAutoRestore = self.store.autoRestoreOnAppOpen &&
+            let canAutoRestore = (self.store.autoSaveEnabled || self.store.autoRestoreOnAppOpen) &&
                 (targetID.flatMap { self.automaticRestoreSnapshot(forAppLaunch: $0) } != nil) &&
                 !(self.restoresInFlight > 0 || self.isHandlingDisplayChange) &&
                 !(Date().timeIntervalSince(self.lastFullRestoreTime) < 3.0 && (targetID.map { self.lastFullRestoreBundleIDs.contains($0) } ?? false))
@@ -1507,7 +1547,6 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
             try? await Task.sleep(nanoseconds: 1_200_000_000)
             guard !Task.isCancelled else { return }
             guard let self = self else { return }
-            self.isHandlingSpaceChange = false
             
             // Re-verify space type once the animation finishes settling
             let currentIsDesktop = WindowSpaces.isCurrentSpaceDesktop()
@@ -1517,13 +1556,29 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
             // trigger a clean capture of the desktop arrangement including any queued app launches.
             if (wasNonDesktop || !initialIsDesktop) && currentIsDesktop {
                 let queuedLaunches = self.pendingAppLaunchesOnOtherSpaces
-                self.pendingAppLaunchesOnOtherSpaces.removeAll()
                 if !queuedLaunches.isEmpty {
                     self.log("Returned to desktop space — flushing \(queuedLaunches.count) queued app launch(es)", level: .moderate, type: .autoSave)
                 } else {
                     self.log("Returned to desktop space — capturing clean desktop layout", level: .moderate, type: .autoSave)
                 }
+
+                // Let the desktop's window list settle after the Space animation.
+                // A newer Space change cancels this task; keep queued launches until
+                // the delayed capture is still valid.
+                try? await Task.sleep(nanoseconds: 500_000_000)
+                guard !Task.isCancelled else { return }
+                guard WindowSpaces.isCurrentSpaceDesktop() else {
+                    self.isFocusedOnNonDesktopSpace = true
+                    self.isHandlingSpaceChange = false
+                    return
+                }
+
+                self.isFocusedOnNonDesktopSpace = false
+                self.isHandlingSpaceChange = false
+                self.pendingAppLaunchesOnOtherSpaces.removeAll()
                 self.flushPendingSaves()
+            } else {
+                self.isHandlingSpaceChange = false
             }
         }
 
@@ -1581,6 +1636,303 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
         }
     }
 
+    private func autoLayoutKey(for record: WindowRecord) -> AutoLayoutWindowKey {
+        if let cgWindowID = record.cgWindowID {
+            return .cgWindow(bundleID: record.windowID.appBundleID, windowID: cgWindowID)
+        }
+        return .window(record.windowID)
+    }
+
+    /// Reuses a tracked identity when an app's title or AX window index changes.
+    /// CG window IDs are preferred; title/index matching is only a fallback for
+    /// apps that do not expose one.
+    private func existingAutoLayoutKey(for record: WindowRecord) -> AutoLayoutWindowKey {
+        let exactKey = autoLayoutKey(for: record)
+        if trackedAutoLayoutWindows[exactKey] != nil { return exactKey }
+
+        guard let fallback = trackedAutoLayoutWindows.first(where: { pair in
+            let tracked = pair.value
+            guard tracked.record.windowID.appBundleID == record.windowID.appBundleID,
+                  tracked.record.cgWindowID == nil || record.cgWindowID == nil else { return false }
+            return (!record.windowID.windowTitle.isEmpty &&
+                    tracked.record.windowID.windowTitle == record.windowID.windowTitle)
+                || tracked.record.windowID.appWindowIndex == record.windowID.appWindowIndex
+        }) else {
+            return exactKey
+        }
+        return fallback.key
+    }
+
+    private func clearAutoLayoutWindowTracking() {
+        windowDestructionResolutionTask?.cancel()
+        windowDestructionResolutionTask = nil
+        pendingWindowDestructions.removeAll()
+        trackedAutoLayoutWindows.removeAll()
+        nextAutoLayoutWindowOpeningOrder = 0
+        didInitializeAutoLayoutWindowOrder = false
+        pendingAutoLayoutOpeningOrders.removeAll()
+    }
+
+    /// Refreshes stable frames, assigns opening order to newly observed
+    /// windows, and seeds any app/display default that does not exist yet.
+    private func updateAutoLayoutWindowTracking(with records: [WindowRecord],
+                                               screenKey: String,
+                                               readableScreenKey: String?) {
+        guard store.autoSaveEnabled else { return }
+        let isInitialObservation = !didInitializeAutoLayoutWindowOrder
+        if isInitialObservation {
+            // Windows already open when learning starts have no creation
+            // events. Their first capture order is the approved fallback.
+            pendingAutoLayoutOpeningOrders.removeAll()
+        }
+
+        for record in records {
+            let exactKey = autoLayoutKey(for: record)
+            let existingKey = existingAutoLayoutKey(for: record)
+            let processID = NSWorkspace.shared.runningApplications.first {
+                $0.bundleIdentifier == record.windowID.appBundleID
+                    || $0.localizedName == record.windowID.appBundleID
+            }?.processIdentifier
+
+            if var tracked = trackedAutoLayoutWindows.removeValue(forKey: existingKey) {
+                tracked.record = record
+                tracked.processID = processID ?? tracked.processID
+                trackedAutoLayoutWindows[exactKey] = tracked
+            } else {
+                let openingOrder = isInitialObservation
+                    ? nextAutoLayoutWindowOpeningOrder
+                    : pendingAutoLayoutOpeningOrders.removeValue(forKey: exactKey) ?? nextAutoLayoutWindowOpeningOrder
+                trackedAutoLayoutWindows[exactKey] = TrackedAutoLayoutWindow(
+                    openingOrder: openingOrder,
+                    processID: processID,
+                    record: record
+                )
+                if openingOrder >= nextAutoLayoutWindowOpeningOrder {
+                    nextAutoLayoutWindowOpeningOrder = openingOrder &+ 1
+                }
+            }
+        }
+        didInitializeAutoLayoutWindowOrder = true
+
+        let firstWindowPerApp = Dictionary(grouping: trackedAutoLayoutWindows.values.filter {
+            $0.record.screenKey == screenKey
+        }, by: { $0.record.windowID.appBundleID })
+            .values
+            .compactMap { windows in windows.min { $0.openingOrder < $1.openingOrder } }
+            .sorted { $0.openingOrder < $1.openingOrder }
+            .map(\.record)
+
+        autoSaveStore?.seedAppWindowDefaults(from: firstWindowPerApp,
+                                             screenKey: screenKey,
+                                             readableScreenKey: readableScreenKey)
+    }
+
+    /// Polling has no individual AX destroy event, so a stable capture compares
+    /// the open set with the current WindowServer result. If several vanished
+    /// between polls, the oldest of them is the deterministic batch fallback.
+    private func reconcilePolledAutoLayoutWindows(with records: [WindowRecord],
+                                                  screenKey: String,
+                                                  readableScreenKey: String?) {
+        guard store.autoSaveEnabled,
+              !isHandlingDisplayChange,
+              !isHandlingSpaceChange,
+              !isFocusedOnNonDesktopSpace,
+              !isRestoreInFlight,
+              WindowSpaces.isCurrentSpaceDesktop() else { return }
+
+        updateAutoLayoutWindowTracking(with: records,
+                                       screenKey: screenKey,
+                                       readableScreenKey: readableScreenKey)
+        let currentKeys = Set(records.map { existingAutoLayoutKey(for: $0) })
+        let appBundleIDs = Set(trackedAutoLayoutWindows.values.map { $0.record.windowID.appBundleID })
+
+        for bundleID in appBundleIDs {
+            guard NSWorkspace.shared.runningApplications.contains(where: {
+                $0.bundleIdentifier == bundleID || $0.localizedName == bundleID
+            }) else { continue }
+
+            let missing = trackedAutoLayoutWindows.filter { pair in
+                let key = pair.key
+                let tracked = pair.value
+                return tracked.record.windowID.appBundleID == bundleID
+                    && tracked.record.screenKey == screenKey
+                    && !currentKeys.contains(key)
+            }
+            guard let chosen = missing.map(\.value).min(by: { $0.openingOrder < $1.openingOrder }) else { continue }
+            autoSaveStore?.rememberClosedWindowAsDefault(chosen.record,
+                                                         screenKey: chosen.record.screenKey,
+                                                         readableScreenKey: readableScreenKey)
+            for (key, _) in missing {
+                trackedAutoLayoutWindows.removeValue(forKey: key)
+            }
+            log("Auto Layout default for \(bundleID) set from a closed window observed by polling",
+                level: .moderate, type: .autoSave)
+        }
+    }
+
+    /// A normal app quit uses the oldest still-open window as its default.
+    /// Windows closed earlier have already been removed from this runtime map.
+    private func rememberTerminatingAppDefault(bundleID: String, processID: pid_t? = nil) {
+        guard store.autoSaveEnabled else { return }
+        let candidates = trackedAutoLayoutWindows.values.filter { tracked in
+            let belongsToApp = tracked.record.windowID.appBundleID == bundleID
+                || tracked.record.windowID.appName == bundleID
+            let belongsToProcess = processID == nil || tracked.processID == nil || tracked.processID == processID
+            return belongsToApp && belongsToProcess
+        }
+        if let candidate = candidates.min(by: { $0.openingOrder < $1.openingOrder }) {
+            autoSaveStore?.rememberClosedWindowAsDefault(candidate.record,
+                                                         screenKey: candidate.record.screenKey,
+                                                         readableScreenKey: ScreenFingerprint.from(key: candidate.record.screenKey).readableName)
+            log("Auto Layout default for \(bundleID) set from its oldest still-open window",
+                level: .moderate, type: .autoSave)
+        }
+
+        let trackedKeysToRemove = trackedAutoLayoutWindows.compactMap { pair -> AutoLayoutWindowKey? in
+            let key = pair.key
+            let tracked = pair.value
+            let belongsToApp = tracked.record.windowID.appBundleID == bundleID
+                || tracked.record.windowID.appName == bundleID
+            let belongsToProcess = processID == nil || tracked.processID == nil || tracked.processID == processID
+            return belongsToApp && belongsToProcess ? key : nil
+        }
+        for key in trackedKeysToRemove {
+            trackedAutoLayoutWindows.removeValue(forKey: key)
+        }
+        let pendingKeysToRemove = pendingAutoLayoutOpeningOrders.compactMap { pair -> AutoLayoutWindowKey? in
+            let key = pair.key
+            switch key {
+            case .cgWindow(let appID, _):
+                return appID == bundleID ? key : nil
+            case .window(let windowID):
+                return windowID.appBundleID == bundleID ? key : nil
+            }
+        }
+        for key in pendingKeysToRemove {
+            pendingAutoLayoutOpeningOrders.removeValue(forKey: key)
+        }
+    }
+
+    /// Reserves creation order as soon as AX reports a new window, before the
+    /// next full geometry scan can reorder it by front-to-back stacking order.
+    private func noteWindowCreated(processID: pid_t?, cgWindowID: CGWindowID?) {
+        guard store.autoSaveEnabled,
+              didInitializeAutoLayoutWindowOrder,
+              let processID,
+              let cgWindowID,
+              let app = NSRunningApplication(processIdentifier: processID),
+              let bundleID = app.bundleIdentifier ?? app.localizedName else { return }
+        let key = AutoLayoutWindowKey.cgWindow(bundleID: bundleID, windowID: cgWindowID)
+        guard trackedAutoLayoutWindows[key] == nil,
+              pendingAutoLayoutOpeningOrders[key] == nil else { return }
+        pendingAutoLayoutOpeningOrders[key] = nextAutoLayoutWindowOpeningOrder
+        nextAutoLayoutWindowOpeningOrder &+= 1
+    }
+
+    /// AX destroy events are delayed briefly so Command-Q can be recognized as
+    /// one app termination. If the app remains alive, each destroyed window is
+    /// applied in event order, making the last individually closed window win.
+    private func noteWindowDestroyed(processID: pid_t?,
+                                     cgWindowID: CGWindowID?,
+                                     title: String?) {
+        guard store.autoSaveEnabled else { return }
+        let processApp = processID.flatMap { NSRunningApplication(processIdentifier: $0) }
+        let trackedMatch = trackedAutoLayoutWindows.first { pair in
+            let tracked = pair.value
+            if let cgWindowID, tracked.record.cgWindowID == cgWindowID { return true }
+            return processID != nil && tracked.processID == processID
+                && title.map { !$0.isEmpty && tracked.record.windowID.windowTitle == $0 } == true
+        }.map(\.value)
+        let bundleID = processApp?.bundleIdentifier
+            ?? processApp?.localizedName
+            ?? trackedMatch?.record.windowID.appBundleID
+        if let processID, let cgWindowID,
+           let app = processApp,
+           let bundleID = app.bundleIdentifier ?? app.localizedName {
+            pendingAutoLayoutOpeningOrders.removeValue(
+                forKey: .cgWindow(bundleID: bundleID, windowID: cgWindowID)
+            )
+        }
+        pendingWindowDestructions.append(PendingWindowDestruction(
+            processID: processID,
+            bundleID: bundleID,
+            cgWindowID: cgWindowID,
+            title: title,
+            occurredAt: Date()
+        ))
+        scheduleWindowDestructionResolution()
+    }
+
+    private func scheduleWindowDestructionResolution() {
+        guard windowDestructionResolutionTask == nil,
+              let first = pendingWindowDestructions.first else { return }
+        let delay = max(0.55 - Date().timeIntervalSince(first.occurredAt), 0)
+        windowDestructionResolutionTask = Task { @MainActor [weak self] in
+            if delay > 0 {
+                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            }
+            guard !Task.isCancelled, let self else { return }
+            self.windowDestructionResolutionTask = nil
+            self.resolvePendingWindowDestructions()
+        }
+    }
+
+    private func resolvePendingWindowDestructions() {
+        guard store.autoSaveEnabled else {
+            pendingWindowDestructions.removeAll()
+            return
+        }
+
+        let now = Date()
+        while let event = pendingWindowDestructions.first,
+              now.timeIntervalSince(event.occurredAt) >= 0.55 {
+            pendingWindowDestructions.removeFirst()
+            let app = event.processID.flatMap { NSRunningApplication(processIdentifier: $0) }
+            guard app?.isTerminated != true else {
+                // The termination notification will choose from the complete
+                // pre-quit open-window set and clear the remaining events.
+                continue
+            }
+            let expectedBundleID = event.bundleID ?? app?.bundleIdentifier ?? app?.localizedName
+            let candidates = trackedAutoLayoutWindows.filter { pair in
+                let tracked = pair.value
+                let sameProcess = event.processID == nil || tracked.processID == nil || tracked.processID == event.processID
+                let sameApp = expectedBundleID == nil
+                    || tracked.record.windowID.appBundleID == expectedBundleID
+                    || tracked.record.windowID.appName == expectedBundleID
+                return sameProcess && sameApp
+            }
+            let match: (key: AutoLayoutWindowKey, value: TrackedAutoLayoutWindow)?
+            if let eventWindowID = event.cgWindowID {
+                match = candidates.first { $0.value.record.cgWindowID == eventWindowID }
+            } else if let title = event.title, !title.isEmpty {
+                let titleMatches = candidates.filter { $0.value.record.windowID.windowTitle == title }
+                match = event.processID == nil && titleMatches.count != 1 ? nil : titleMatches.first
+            } else if event.processID != nil && candidates.count == 1 {
+                match = candidates.first
+            } else {
+                match = nil
+            }
+            guard let (key, tracked) = match else { continue }
+            guard let liveApp = NSWorkspace.shared.runningApplications.first(where: {
+                $0.bundleIdentifier == tracked.record.windowID.appBundleID
+                    || $0.localizedName == tracked.record.windowID.appBundleID
+            }) else { continue }
+            if let trackedProcessID = tracked.processID,
+               trackedProcessID != liveApp.processIdentifier { continue }
+            let bundleID = liveApp.bundleIdentifier ?? liveApp.localizedName ?? tracked.record.windowID.appBundleID
+
+            autoSaveStore?.rememberClosedWindowAsDefault(tracked.record,
+                                                         screenKey: tracked.record.screenKey,
+                                                         readableScreenKey: ScreenFingerprint.from(key: tracked.record.screenKey).readableName)
+            trackedAutoLayoutWindows.removeValue(forKey: key)
+            log("Auto Layout default for \(bundleID) set from its last individually closed window",
+                level: .moderate, type: .autoSave)
+        }
+
+        scheduleWindowDestructionResolution()
+    }
+
     /// Restores every held app that can be reached now, and forgets it.
     private func restoreReachableHeldApps(reason: String) {
         guard let deferred = deferredRestore, !deferred.bundleIDs.isEmpty else { return }
@@ -1626,6 +1978,16 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
     @objc private func appTerminated(_ note: Notification) {
         guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
         let pid = app.processIdentifier
+        if let bundleID = app.bundleIdentifier ?? app.localizedName {
+            rememberTerminatingAppDefault(bundleID: bundleID, processID: pid)
+        }
+        let terminatedBundleIDs = Set([app.bundleIdentifier, app.localizedName].compactMap { $0 })
+        pendingWindowDestructions.removeAll {
+            $0.processID == pid || ($0.bundleID.map { terminatedBundleIDs.contains($0) } ?? false)
+        }
+        windowDestructionResolutionTask?.cancel()
+        windowDestructionResolutionTask = nil
+        scheduleWindowDestructionResolution()
         detachAXObserver(for: pid)
         // Invalidate AX caches for this PID so stale data doesn't linger
         cachedAXWindowsByPID.removeValue(forKey: pid)
@@ -1680,17 +2042,30 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
         let names: [NSNotification.Name] = [
             NSWindow.didMoveNotification,
             NSWindow.didResizeNotification,
-            NSWindow.didBecomeKeyNotification
+            NSWindow.didBecomeKeyNotification,
+            NSWindow.willCloseNotification
         ]
         for name in names {
             let obs = nc.addObserver(forName: name, object: nil, queue: .main) { [weak self] note in
                 Task { @MainActor in
                     guard let win = note.object as? NSWindow else { return }
-                    self?.windowDidChange(win)
+                    if name == NSWindow.willCloseNotification {
+                        self?.windowWillClose(win)
+                    } else {
+                        self?.windowDidChange(win)
+                    }
                 }
             }
             windowObservers.append(obs as AnyObject)
         }
+    }
+
+    private func windowWillClose(_ window: NSWindow) {
+        let processID = ProcessInfo.processInfo.processIdentifier
+        let windowNumber = window.windowNumber
+        let windowID = windowNumber > 0 ? CGWindowID(exactly: windowNumber) : nil
+        noteWindowDestroyed(processID: processID, cgWindowID: windowID, title: window.title)
+        scheduleAXEventFlush(delay: 0, urgent: true)
     }
 
     private func windowDidChange(_ window: NSWindow) {
@@ -1753,12 +2128,19 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
     /// front of the user now.
     func snapshot(from entry: AutoSaveEntry) -> LayoutSnapshot? {
         guard entry.screenKey == currentFingerprint.key else { return nil }
+        var seenBundleIDs = Set<String>()
+        let appRecords = entry.records.compactMap { record -> WindowRecord? in
+            let bundleID = record.windowID.appBundleID
+            guard seenBundleIDs.insert(bundleID).inserted else { return nil }
+            return autoSaveStore?.appWindowDefault(forBundleID: bundleID,
+                                                   screenKey: entry.screenKey) ?? record
+        }
         return LayoutSnapshot(
             id: entry.id,
             name: entry.readableScreenKey ?? currentFingerprint.readableName,
             screenKey: entry.screenKey,
             readableScreenKey: entry.readableScreenKey,
-            records: entry.records,
+            records: appRecords,
             createdAt: entry.capturedAt,
             updatedAt: entry.capturedAt,
             location: nil,
@@ -1780,18 +2162,19 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
     func lastKnownSnapshot(forAppLaunch bundleID: String) -> LayoutSnapshot? {
         guard let store = autoSaveStore else { return nil }
         let key = currentFingerprint.key
-        let records = store.lastKnown.filter {
+        let legacyRecords = store.lastKnown.filter {
             $0.screenKey == key
                 && ($0.windowID.appBundleID == bundleID || $0.windowID.appName == bundleID)
         }
-        guard !records.isEmpty else { return nil }
+        guard let record = store.appWindowDefault(forBundleID: bundleID, screenKey: key)
+                ?? legacyRecords.first else { return nil }
         return LayoutSnapshot(
             name: currentFingerprint.readableName,
             screenKey: key,
             readableScreenKey: currentFingerprint.readableName,
-            records: records,
-            createdAt: records.map(\.savedAt).min() ?? Date(),
-            updatedAt: records.map(\.savedAt).max() ?? Date(),
+            records: [record],
+            createdAt: record.savedAt,
+            updatedAt: record.savedAt,
             location: nil,
             isAutoSave: true,
             foregroundBundleID: nil,
@@ -1822,6 +2205,12 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
         }
 
         if store.autoSaveEnabled {
+            if let bundleID, let remembered = lastKnownSnapshot(forAppLaunch: bundleID) {
+                log("Using the app's saved Auto Layout default for \(bundleID)",
+                    level: .verbose, type: .autoSave)
+                return (remembered, true)
+            }
+
             // For a newly launching app (bundleID != nil), the newest auto capture
             // (autoLayoutSnapshot) describes the live desktop which may contain the newly opened window at its
             // un-restored default launch coordinates. We must never restore a launching app
@@ -1966,6 +2355,25 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
         let newCount = currentWindows.count
         commitCoordinatedShrinkBaseline(using: signature, for: currentWindows)
 
+        if store.autoSaveEnabled
+            && !isHandlingDisplayChange
+            && !isHandlingSpaceChange
+            && !isFocusedOnNonDesktopSpace
+            && !isSettlingContestedWindows
+            && !isSettlingRestoredLayout
+            && !isRestoreInFlight {
+            let stableWindows = holdingHeldWindows(currentWindows, screenKey: fp.key)
+            if store.usePollingMode {
+                reconcilePolledAutoLayoutWindows(with: stableWindows,
+                                                 screenKey: fp.key,
+                                                 readableScreenKey: fp.readableName)
+            } else {
+                updateAutoLayoutWindowTracking(with: stableWindows,
+                                               screenKey: fp.key,
+                                               readableScreenKey: fp.readableName)
+            }
+        }
+
         let isInitialServerCapture = !isLiveLayoutServerReady
         if isInitialServerCapture {
             markWindowServerReady()
@@ -1974,7 +2382,20 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
         // AX can repeatedly notify us about an app that has not actually changed. Publishing
         // the same layout re-renders the full SwiftUI preview (and its springs) every time,
         // preventing App Nap and causing substantial idle energy use.
-        guard liveLayoutChanged(from: liveRecords, to: currentWindows) else {
+        let layoutChanged = liveLayoutChanged(from: liveRecords, to: currentWindows)
+        if store.usePollingMode && !isRestoreInFlight {
+            // Polling uses this map to find the next change. Refresh it only
+            // after comparing against `liveRecords`, so a detected move still
+            // reaches the shared settled capture and AutoSaveStore. Keep it
+            // unchanged during a restore so its final settled geometry remains
+            // detectable after the transient movement ends.
+            var nextMap: [WindowID: (frame: CGRect, id: UUID)] = [:]
+            for record in currentWindows {
+                nextMap[record.windowID] = (record.globalFrame, record.id)
+            }
+            lastKnownWindows = nextMap
+        }
+        guard layoutChanged else {
             // A noisy AX source becomes almost free at idle: 2, 4, 8, 16, then at most
             // one validation scan every 30 seconds.
             axIdleCaptureInterval = min(axIdleCaptureInterval * 2, 30)
@@ -3560,11 +3981,17 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
         let spaceFilterActive = WindowSpaces.isAvailable
         var liveWindowIDs: Set<CGWindowID> = []
         var parkedWindowIDs: Set<CGWindowID> = []
+        var fullScreenSpaceWindowIDs: Set<CGWindowID> = []
         var pidsWithNoLiveWindow: Set<Int32> = []
         if spaceFilterActive {
             let candidates = cgWindowsByPID.values.flatMap { $0.map { $0.windowID } }
             let spacesByWindow = WindowSpaces.spaces(of: candidates)
             let current = WindowSpaces.currentSpaces()
+            if let fullScreenSpaceIDs = WindowSpaces.fullScreenSpaceIDs() {
+                fullScreenSpaceWindowIDs = Set(spacesByWindow.compactMap { entry in
+                    entry.value.contains(where: fullScreenSpaceIDs.contains) ? entry.key : nil
+                })
+            }
             liveWindowIDs = Set(spacesByWindow.filter { !$0.value.isEmpty }.keys)
             // Parked: real, but on a Space the user is not looking at. These are
             // the windows the accessibility tree will not describe, so they can
@@ -3596,6 +4023,7 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
             let area: CGFloat
             let zOrder: Int        // position in CGWindowList (front = lower index)
             let isAXFullScreen: Bool
+            let isOnFullScreenSpace: Bool
             let frame: CGRect
             let matchedAXFrameIndex: Int // index into axWindowsByPID[pid]; -1 if no AX data
             /// Real, but on a Space the user is not on, so it has no accessibility
@@ -3638,6 +4066,8 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
             let isOnScreen = entry[kCGWindowIsOnscreen as String] as? Bool ?? false
             let title = entry[kCGWindowName as String] as? String ?? ""
             let cgFrame = CGRect(x: x, y: y, width: w, height: h)
+            let windowID = entry[kCGWindowNumber as String] as? CGWindowID
+            let isOnFullScreenSpace = windowID.map { fullScreenSpaceWindowIDs.contains($0) } ?? false
             var isAXFullScreen = false
 
             // --- Pre-filter obvious ghost windows ---
@@ -3668,8 +4098,9 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
                     }
                 }
 
-                let windowID = entry[kCGWindowNumber as String] as? CGWindowID
-                let isParked = spaceFilterActive && windowID.map { parkedWindowIDs.contains($0) } == true
+                let isParked = spaceFilterActive && (windowID.map {
+                    parkedWindowIDs.contains($0) || fullScreenSpaceWindowIDs.contains($0)
+                } ?? false)
 
                 if matchedIdx == -1 && !isParked {
                     // No accessibility frame and on the Space in front of the
@@ -3680,6 +4111,7 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
 
                 let raw = RawEntry(entry: entry, pid: pid, isOnScreen: isOnScreen,
                                    area: w * h, zOrder: zOrder, isAXFullScreen: isAXFullScreen,
+                                   isOnFullScreenSpace: isOnFullScreenSpace,
                                    frame: cgFrame, matchedAXFrameIndex: matchedIdx,
                                    isParked: matchedIdx == -1 && isParked)
                 groupedEntries[pid, default: []].append(raw)
@@ -3687,6 +4119,7 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
                 // No AX data — deduplication will handle this app.
                 let raw = RawEntry(entry: entry, pid: pid, isOnScreen: isOnScreen,
                                    area: w * h, zOrder: zOrder, isAXFullScreen: false,
+                                   isOnFullScreenSpace: isOnFullScreenSpace,
                                    frame: cgFrame, matchedAXFrameIndex: -1)
                 groupedEntries[pid, default: []].append(raw)
             }
@@ -3857,8 +4290,10 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
                 zIndex: currentZIndex
             )
 
-            // Mark windows that are in native macOS full-screen mode.
-            if raw.isAXFullScreen {
+            // AX sees a full-screen window only while its Space is active. Space
+            // metadata also identifies a native full-screen window parked on a
+            // different Space after the user returns to the desktop.
+            if raw.isAXFullScreen || (raw.isOnFullScreenSpace && !raw.isOnScreen) {
                 record.isNativeFullScreen = true
                 record.isFullScreenMode = true
             } else if let s = screen {
@@ -4419,6 +4854,7 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
                 let record: WindowRecord
                 let element: AXUIElement
                 let targetFrame: CGRect
+                let liveRecord: WindowRecord?
             }
             var resolvedTargets: [ResolvedTarget] = []
             var deferredBundleIDs: Set<String> = []
@@ -4447,7 +4883,7 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
             let groupedRecords = Dictionary(grouping: externalRecords, by: { $0.windowID.appBundleID })
 
             // Optional: Launch closed apps sequentially if enabled for full restore
-            if specificAppBundleID == nil && self.store.launchMissingAppsOnRestore {
+            if specificAppBundleID == nil && self.store.launchMissingAppsOnRestore && !snapshot.isAutoSave {
                 let missingBundleIDs = groupedRecords.keys.filter { bundleID in
                     !runningApps.values.contains { $0.bundleIdentifier == bundleID || $0.localizedName == bundleID }
                 }
@@ -4520,22 +4956,41 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
                 }
 
                 // If all records for this app are already full-screen on the target screen, skip AX resolution & DO NOT activate/focus!
-                let isAlreadyFullScreenOnTargetScreen = appRecords.allSatisfy { record in
-                    guard record.isNativeFullScreen || record.isFullScreenMode else { return false }
-                    guard let lr = liveRecords.first(where: {
-                        if let targetCGID = record.cgWindowID, let liveCGID = $0.cgWindowID, targetCGID == liveCGID {
-                            return true
+                let isTemplateRecord = appRecords.count == 1
+                    && appRecords[0].cgWindowID == nil
+                    && appRecords[0].windowID.windowTitle.isEmpty
+                let isAlreadyFullScreenOnTargetScreen: Bool = {
+                    if isTemplateRecord, let template = appRecords.first {
+                        guard template.isNativeFullScreen || template.isFullScreenMode else { return false }
+                        let liveAppWindows = liveRecords.filter {
+                            $0.windowID.appBundleID == template.windowID.appBundleID
                         }
-                        return $0.windowID.appBundleID == record.windowID.appBundleID &&
-                        (record.windowID.windowTitle.isEmpty ? $0.windowID.appWindowIndex == record.windowID.appWindowIndex : $0.windowID.windowTitle == record.windowID.windowTitle)
-                    }) else { return false }
-                    guard lr.isNativeFullScreen || lr.isFullScreenMode else { return false }
-                    let sameScreen = lr.screenName == record.screenName ||
-                                     (lr.screenFrame != nil && record.screenFrame != nil &&
-                                      abs(lr.screenFrame!.origin.x - record.screenFrame!.origin.x) < 5 &&
-                                      abs(lr.screenFrame!.origin.y - record.screenFrame!.origin.y) < 5)
-                    return sameScreen
-                }
+                        guard !liveAppWindows.isEmpty else { return false }
+                        return liveAppWindows.allSatisfy { liveWindow in
+                            guard liveWindow.isNativeFullScreen || liveWindow.isFullScreenMode else { return false }
+                            return liveWindow.screenName == template.screenName
+                                || (liveWindow.screenFrame != nil && template.screenFrame != nil
+                                    && abs(liveWindow.screenFrame!.origin.x - template.screenFrame!.origin.x) < 5
+                                    && abs(liveWindow.screenFrame!.origin.y - template.screenFrame!.origin.y) < 5)
+                        }
+                    }
+
+                    return appRecords.allSatisfy { record in
+                        guard record.isNativeFullScreen || record.isFullScreenMode else { return false }
+                        guard let lr = liveRecords.first(where: {
+                            if let targetCGID = record.cgWindowID, let liveCGID = $0.cgWindowID, targetCGID == liveCGID {
+                                return true
+                            }
+                            return $0.windowID.appBundleID == record.windowID.appBundleID &&
+                            (record.windowID.windowTitle.isEmpty ? $0.windowID.appWindowIndex == record.windowID.appWindowIndex : $0.windowID.windowTitle == record.windowID.windowTitle)
+                        }) else { return false }
+                        guard lr.isNativeFullScreen || lr.isFullScreenMode else { return false }
+                        return lr.screenName == record.screenName
+                            || (lr.screenFrame != nil && record.screenFrame != nil
+                                && abs(lr.screenFrame!.origin.x - record.screenFrame!.origin.x) < 5
+                                && abs(lr.screenFrame!.origin.y - record.screenFrame!.origin.y) < 5)
+                    }
+                }()
 
                 if isAlreadyFullScreenOnTargetScreen {
                     self.log("ℹ️ Skipping AX resolution & activation for '\(bundleID)' — already full-screen on target display", level: .verbose, type: .restore)
@@ -4649,6 +5104,76 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
                     return ""
                 }
 
+                func makeResolvedTarget(record: WindowRecord,
+                                        element: AXUIElement,
+                                        targetFrame: CGRect) -> ResolvedTarget {
+                    let elementCGWindowID = WindowManager.windowNumber(of: element)
+                    let isGenericTemplate = record.cgWindowID == nil
+                        && record.windowID.windowTitle.isEmpty
+                        && record.windowID.appWindowIndex == 0
+                    let title = getTitle(of: element)
+                    let liveRecord: WindowRecord?
+                    if let elementCGWindowID {
+                        liveRecord = liveRecords.first { $0.cgWindowID == elementCGWindowID }
+                    } else if !title.isEmpty {
+                        liveRecord = liveRecords.first {
+                            $0.windowID.appBundleID == record.windowID.appBundleID
+                                && $0.windowID.windowTitle == title
+                        }
+                    } else if isGenericTemplate {
+                        // Do not borrow the first window's full-screen state
+                        // for every broadcast target. restoreViaAX reads this
+                        // target's own AX state when identity is unavailable.
+                        liveRecord = nil
+                    } else {
+                        liveRecord = liveRecords.first {
+                            $0.windowID.appBundleID == record.windowID.appBundleID
+                                && $0.windowID.appWindowIndex == record.windowID.appWindowIndex
+                        }
+                    }
+
+                    var targetRecord = record
+                    if let liveRecord {
+                        targetRecord = WindowRecord(
+                            id: record.id,
+                            windowID: liveRecord.windowID,
+                            cgWindowID: liveRecord.cgWindowID,
+                            globalFrame: record.globalFrame,
+                            screenKey: record.screenKey,
+                            screenFrame: record.screenFrame,
+                            screenName: record.screenName,
+                            savedAt: record.savedAt,
+                            zIndex: liveRecord.zIndex,
+                            isFullScreenMode: record.isFullScreenMode,
+                            isNativeFullScreen: record.isNativeFullScreen
+                        )
+                    } else if let elementCGWindowID {
+                        targetRecord.cgWindowID = elementCGWindowID
+                    } else if isGenericTemplate, !title.isEmpty {
+                        targetRecord = WindowRecord(
+                            id: record.id,
+                            windowID: WindowID(appBundleID: record.windowID.appBundleID,
+                                               appName: record.windowID.appName,
+                                               windowTitle: title,
+                                               appWindowIndex: record.windowID.appWindowIndex),
+                            cgWindowID: nil,
+                            globalFrame: record.globalFrame,
+                            screenKey: record.screenKey,
+                            screenFrame: record.screenFrame,
+                            screenName: record.screenName,
+                            savedAt: record.savedAt,
+                            zIndex: record.zIndex,
+                            isFullScreenMode: record.isFullScreenMode,
+                            isNativeFullScreen: record.isNativeFullScreen
+                        )
+                    }
+
+                    return ResolvedTarget(record: targetRecord,
+                                          element: element,
+                                          targetFrame: targetFrame,
+                                          liveRecord: liveRecord)
+                }
+
                 /// How badly a window's size fits a record's: 0 is a perfect fit.
                 /// Pass 0 uses it as a guard and Pass 3 matches on it.
                 func matchScore(_ rec: WindowRecord, _ el: AXUIElement) -> CGFloat? {
@@ -4691,7 +5216,7 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
                     }
                     unclaimed.remove(at: idx)
                     let target = self.calculateTargetFrame(for: rec)
-                    matchedTargetsForApp.append(ResolvedTarget(record: rec, element: element, targetFrame: target))
+                    matchedTargetsForApp.append(makeResolvedTarget(record: rec, element: element, targetFrame: target))
                 }
 
                 // Pass 1: Exact title match
@@ -4701,7 +5226,7 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
                     if let idx = unclaimed.firstIndex(where: { getTitle(of: $0) == rec.windowID.windowTitle }) {
                         let element = unclaimed.remove(at: idx)
                         let target = self.calculateTargetFrame(for: rec)
-                        matchedTargetsForApp.append(ResolvedTarget(record: rec, element: element, targetFrame: target))
+                        matchedTargetsForApp.append(makeResolvedTarget(record: rec, element: element, targetFrame: target))
                     }
                 }
                 
@@ -4717,7 +5242,7 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
                     }) {
                         let element = unclaimed.remove(at: idx)
                         let target = self.calculateTargetFrame(for: rec)
-                        matchedTargetsForApp.append(ResolvedTarget(record: rec, element: element, targetFrame: target))
+                        matchedTargetsForApp.append(makeResolvedTarget(record: rec, element: element, targetFrame: target))
                     }
                 }
                 
@@ -4757,7 +5282,7 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
                     let rec = unmatchedRecords[pair.recordIndex]
                     claimedRecordIndices.insert(pair.recordIndex)
                     let target = self.calculateTargetFrame(for: rec)
-                    matchedTargetsForApp.append(ResolvedTarget(record: rec, element: element, targetFrame: target))
+                    matchedTargetsForApp.append(makeResolvedTarget(record: rec, element: element, targetFrame: target))
                 }
 
                 // Pass 4: Fallback index match for any remaining unmatched records
@@ -4788,7 +5313,7 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
                     }
                     let element = unclaimed.removeFirst()
                     let target = self.calculateTargetFrame(for: rec)
-                    matchedTargetsForApp.append(ResolvedTarget(record: rec, element: element, targetFrame: target))
+                    matchedTargetsForApp.append(makeResolvedTarget(record: rec, element: element, targetFrame: target))
                 }
                 if recordsWithNoWindow > 0 {
                     // Said out loud rather than dropped silently: this is the state that
@@ -4826,7 +5351,9 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
                 if let templateRecord = appRecords.first {
                     let target = self.calculateTargetFrame(for: templateRecord)
                     for extraWin in unclaimed {
-                        matchedTargetsForApp.append(ResolvedTarget(record: templateRecord, element: extraWin, targetFrame: target))
+                        matchedTargetsForApp.append(makeResolvedTarget(record: templateRecord,
+                                                                       element: extraWin,
+                                                                       targetFrame: target))
                     }
                     unclaimed.removeAll()
                 }
@@ -4939,13 +5466,7 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
 
                 // Skip if app is already full-screen on the correct screen in the live layout
                 if (record.isNativeFullScreen || record.isFullScreenMode) {
-                    let liveRecord = liveRecords.first { lr in
-                        if let targetCGID = record.cgWindowID, let liveCGID = lr.cgWindowID, targetCGID == liveCGID {
-                            return true
-                        }
-                        return lr.windowID.appBundleID == record.windowID.appBundleID &&
-                        (record.windowID.windowTitle.isEmpty ? lr.windowID.appWindowIndex == record.windowID.appWindowIndex : lr.windowID.windowTitle == record.windowID.windowTitle)
-                    }
+                    let liveRecord = targetItem.liveRecord
                     if let liveRecord = liveRecord, liveRecord.isNativeFullScreen || liveRecord.isFullScreenMode {
                         let sameScreen = liveRecord.screenName == record.screenName ||
                                          (liveRecord.screenFrame != nil && record.screenFrame != nil &&
@@ -4963,13 +5484,7 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
                 var success = false
                 var windowModified = false
                 
-                let liveRecord = liveRecords.first { lr in
-                    if let targetCGID = record.cgWindowID, let liveCGID = lr.cgWindowID, targetCGID == liveCGID {
-                        return true
-                    }
-                    return lr.windowID.appBundleID == record.windowID.appBundleID &&
-                    (record.windowID.windowTitle.isEmpty ? lr.windowID.appWindowIndex == record.windowID.appWindowIndex : lr.windowID.windowTitle == record.windowID.windowTitle)
-                }
+                let liveRecord = targetItem.liveRecord
                 let res = await self.restoreViaAX(
                     win: targetItem.element,
                     record: record,
@@ -5605,13 +6120,7 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
 
                     for targetItem in mismatchedTargets {
                         let targetFrame = targetItem.targetFrame
-                        let liveRecord = liveRecords.first {
-                            if let targetCGID = targetItem.record.cgWindowID, let liveCGID = $0.cgWindowID, targetCGID == liveCGID {
-                                return true
-                            }
-                            return $0.windowID.appBundleID == targetItem.record.windowID.appBundleID &&
-                            $0.windowID.appWindowIndex == targetItem.record.windowID.appWindowIndex
-                        }
+                        let liveRecord = targetItem.liveRecord
                         _ = await self.restoreViaAX(
                             win: targetItem.element,
                             record: targetItem.record,
@@ -6234,8 +6743,20 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
                     self.cachedAXWindowsByPID = result.cachedAXWindowsByPID
                     self.lastCGWindowsByPID = result.lastCGWindowsByPID
                     let geometry = self.cgGeometrySignature()
+                    self.lastGeometrySignature = geometry
                     self.updateCoordinatedShrinkDetector(with: geometry)
                     self.commitCoordinatedShrinkBaseline(using: geometry, for: result.records)
+                    if self.store.autoSaveEnabled
+                        && !self.isHandlingDisplayChange
+                        && !self.isHandlingSpaceChange
+                        && !self.isFocusedOnNonDesktopSpace
+                        && !self.isSettlingContestedWindows
+                        && !self.isSettlingRestoredLayout
+                        && !self.isRestoreInFlight {
+                        self.updateAutoLayoutWindowTracking(with: result.records,
+                                                           screenKey: fingerprint.key,
+                                                           readableScreenKey: fingerprint.readableName)
+                    }
                     let layoutChanged = self.liveLayoutChanged(from: self.liveRecords, to: result.records)
                     if layoutChanged && !self.isFocusedOnNonDesktopSpace {
                         self.liveRecords = result.records
@@ -6290,15 +6811,42 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
         // The C callback is a plain C function pointer — captures a raw unmanaged pointer to self.
         // We hop to the MainActor explicitly so WindowManager's actor isolation is respected.
         let selfPtr = Unmanaged.passUnretained(self).toOpaque()
-        let err = AXObserverCreate(pid, { _, _, notification, refcon in
+        let err = AXObserverCreate(pid, { _, element, notification, refcon in
             guard let refcon = refcon else { return }
             let manager = Unmanaged<WindowManager>.fromOpaque(refcon).takeUnretainedValue()
-            let deminiaturised = (notification as String) == kAXWindowDeminiaturizedNotification
+            let notificationName = notification as String
+            let deminiaturised = notificationName == kAXWindowDeminiaturizedNotification
+            let windowCreated = notificationName == kAXWindowCreatedNotification
+            let windowDestroyed = notificationName == kAXUIElementDestroyedNotification
+            let windowGeometryEvent = notificationName == kAXWindowMovedNotification
+                || notificationName == kAXWindowResizedNotification
+            let windowLifecycleEvent = windowCreated || windowDestroyed
+            var processID: pid_t = 0
+            let hasProcessID = windowLifecycleEvent && AXUIElementGetPid(element, &processID) == .success
+            let cgWindowID = windowLifecycleEvent ? WindowManager.windowNumber(of: element) : nil
+            var titleRef: CFTypeRef?
+            if windowLifecycleEvent {
+                _ = AXUIElementCopyAttributeValue(element, kAXTitleAttribute as CFString, &titleRef)
+            }
+            let title = titleRef as? String
             Task { @MainActor in
                 if deminiaturised {
                     manager.restoreShownHeldApps(reason: "a window was un-minimised")
                 } else {
-                    manager.scheduleAXEventFlush()
+                    if windowCreated {
+                        manager.noteWindowCreated(processID: hasProcessID ? processID : nil,
+                                                  cgWindowID: cgWindowID)
+                    }
+                    if windowDestroyed {
+                        // A destroyed AX element may no longer answer for its
+                        // PID; its window ID/title can still identify the record.
+                        manager.noteWindowDestroyed(processID: hasProcessID ? processID : nil,
+                                                    cgWindowID: cgWindowID,
+                                                    title: title)
+                    }
+                    manager.scheduleAXEventFlush(delay: 0,
+                                                 urgent: windowLifecycleEvent,
+                                                 geometryEvent: windowGeometryEvent)
                 }
             }
         }, &observer)
@@ -6343,16 +6891,20 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
     /// A few apps emit these notifications while idle, so cancellation-based debouncing alone
     /// would repeatedly allocate tasks and keep the process awake.
     ///
-    /// `urgent` is for an event the user caused, such as a Space switch, rather than an app's
-    /// idle chatter. It skips the idle back-off, which reaches 30 seconds, and replaces a flush
-    /// that back-off already scheduled for later, which would otherwise swallow the request.
-    func scheduleAXEventFlush(delay: UInt64 = 500_000_000, urgent: Bool = false) { // 500 ms default
+    /// `urgent` is for a known lifecycle/desktop event. A move/resize event skips
+    /// idle back-off only when the cheap WindowServer geometry signature confirms
+    /// that a window actually changed; idle AX chatter stays throttled.
+    func scheduleAXEventFlush(delay: UInt64 = 500_000_000,
+                              urgent: Bool = false,
+                              geometryEvent: Bool = false) { // 500 ms default
         guard isLiveLayoutServerReady || !initialWindowServerCaptureInFlight else { return }
         guard isLiveLayoutServerReady else {
             startInitialWindowServerCapture()
             return
         }
-        if urgent && isAXFlushScheduled {
+        let geometryChanged = geometryEvent && windowServerGeometryChangedSinceLastSample()
+        let shouldFlushUrgently = urgent || geometryChanged
+        if shouldFlushUrgently && isAXFlushScheduled {
             axEventDebounceTask?.cancel()
             isAXFlushScheduled = false
         }
@@ -6361,7 +6913,7 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
 
         // Keep live tracking responsive after a drag. Repeated idle notifications back off.
         let elapsed = lastAXCaptureDate.map { Date().timeIntervalSince($0) } ?? .infinity
-        let throttleDelay = urgent ? 0 : UInt64(max(0, axIdleCaptureInterval - elapsed) * 1_000_000_000)
+        let throttleDelay = shouldFlushUrgently ? 0 : UInt64(max(0, axIdleCaptureInterval - elapsed) * 1_000_000_000)
         let effectiveDelay = max(delay, throttleDelay)
         axEventDebounceTask = Task { [weak self] in
             if effectiveDelay > 0 {
@@ -6380,6 +6932,17 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
             self.lastAXCaptureDate = Date()
             self.flushPendingSaves()
         }
+    }
+
+    private func windowServerGeometryChangedSinceLastSample() -> Bool {
+        let current = cgGeometrySignature()
+        guard current.count == lastGeometrySignature.count else { return true }
+        for (windowID, frame) in current {
+            guard let previous = lastGeometrySignature[windowID], framesMatch(previous, frame) else {
+                return true
+            }
+        }
+        return false
     }
 
     private func startPolling() {
@@ -6431,16 +6994,11 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
                 }
                 
                 if hasChanges {
-                    let geometry = self.cgGeometrySignature()
-                    self.updateCoordinatedShrinkDetector(with: geometry)
-                    // Update cache with ONLY current windows to avoid accumulating stale IDs
-                    var nextMap: [WindowID: (frame: CGRect, id: UUID)] = [:]
-                    for r in currentRecords {
-                        nextMap[r.windowID] = (r.globalFrame, r.id)
-                    }
-                    self.lastKnownWindows = nextMap
-                    self.liveRecords = currentRecords
-                    self.commitCoordinatedShrinkBaseline(using: geometry, for: currentRecords)
+                    // Let the same settle gate, comparison and AutoSaveStore
+                    // recording path handle changes in either tracking mode.
+                    // Advancing `liveRecords` here would make that path see no
+                    // difference and silently drop moved-layout captures.
+                    self.flushPendingSaves()
                     pollInterval = 5_000_000_000
                 } else {
                     pollInterval = min(pollInterval * 2, maximumPollInterval)
