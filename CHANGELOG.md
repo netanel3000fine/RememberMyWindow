@@ -2,6 +2,18 @@
 
 All notable changes to RememberMyWindows will be documented here.
 
+## [v15.7.1] — 2026-11-03
+
+### 🛡️ "Reliable Quick Restore"
+
+#### ✨ Quick Restore Animation
+- **No disappearing badge** — A new Quick Restore badge remains visible if another restore is triggered while an earlier badge is fading out.
+
+#### 🔐 Accessibility Permission Monitoring
+- **No unnecessary polling** — Permission checks stop after Accessibility access is granted and resume if it is later revoked.
+
+- Thanks to @PerpetualBeta for contributing these fixes.
+
 ## [v15.7] — 2026-10-27
 
 ### 🪟 "Per-App Layout Memory & Smarter Window Restores"
