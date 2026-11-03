@@ -4525,11 +4525,12 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
     func startPermissionMonitoring() {
         refreshAccessibilityPermissionStatus()
 
-        permissionCheckTimer?.invalidate()
-        permissionCheckTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                self?.refreshAccessibilityPermissionStatus()
-            }
+        // Poll only while permission is missing. Once it is granted, the two
+        // activation observers below catch a revoke, because the user has to
+        // switch apps to reach System Settings.
+        stopPermissionPolling()
+        if !hasAccessibilityPermission {
+            startPermissionPolling()
         }
 
         NotificationCenter.default.addObserver(
@@ -4553,6 +4554,20 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
         }
     }
 
+    private func startPermissionPolling() {
+        guard permissionCheckTimer == nil else { return }
+        permissionCheckTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.refreshAccessibilityPermissionStatus()
+            }
+        }
+    }
+
+    private func stopPermissionPolling() {
+        permissionCheckTimer?.invalidate()
+        permissionCheckTimer = nil
+    }
+
     /// Re-evaluates AXIsProcessTrusted() and triggers auto-recovery when permissions become active.
     func refreshAccessibilityPermissionStatus() {
         let current = AXIsProcessTrusted()
@@ -4565,6 +4580,7 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
     private func handlePermissionTransition(to granted: Bool) {
         if granted {
             log("Accessibility permission detected as ACTIVE. Initializing tracking, observers, and shortcuts.", level: .necessary, type: .system)
+            stopPermissionPolling()
             if isTracking && !store.usePollingMode {
                 startAXObservers()
             }
@@ -4575,6 +4591,7 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
             }
         } else {
             log("Accessibility permission is inactive or missing. Waiting for macOS TCC initialization...", level: .moderate, type: .system)
+            startPermissionPolling()
         }
     }
 
