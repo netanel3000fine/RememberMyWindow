@@ -86,14 +86,19 @@ final class CommandOverlayManager {
                 // rather than adding a hop that would delay the fade by a turn
                 // of the run loop.
                 MainActor.assumeIsolated {
-                    guard let self = self else { return }
+                    // Hold the panel this timer belongs to. A new overlay shown
+                    // during the fade replaces currentPanel, and the completion
+                    // must not close that one in its first 0.35s.
+                    guard let self = self, let panel = self.currentPanel else { return }
                     NSAnimationContext.runAnimationGroup({ context in
                         context.duration = 0.35
-                        self.currentPanel?.animator().alphaValue = 0
+                        panel.animator().alphaValue = 0
                     }, completionHandler: {
                         MainActor.assumeIsolated {
-                            self.currentPanel?.orderOut(nil)
-                            self.currentPanel = nil
+                            panel.orderOut(nil)
+                            if self.currentPanel === panel {
+                                self.currentPanel = nil
+                            }
                         }
                     })
                 }
