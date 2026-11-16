@@ -39,6 +39,7 @@ swiftc -parse-as-library \
     WindowLayout/AutoLayoutHeroCard.swift \
     WindowLayout/LayoutsView.swift \
     WindowLayout/ActivityView.swift \
+    WindowLayout/DebugLogWindow.swift \
     WindowLayout/SettingsView.swift \
     WindowLayout/WindowPreviewComponents.swift \
     WindowLayout/NotchShapes.swift \

@@ -34,6 +34,7 @@
 		A1000030 /* WhatsNewView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000030 /* WhatsNewView.swift */; };
 		A1000031 /* NotchShapes.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000031 /* NotchShapes.swift */; };
 		A1000032 /* VorssaintNotchCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000032 /* VorssaintNotchCoordinator.swift */; };
+		A1000034 /* DebugLogWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000034 /* DebugLogWindow.swift */; };
 		A1000021 /* AppIcon.icns in Resources */ = {isa = PBXBuildFile; fileRef = A2000021 /* AppIcon.icns */; };
 		A1000022 /* Sounds in Resources */ = {isa = PBXBuildFile; fileRef = A2000022 /* Sounds */; };
 		A1000023 /* en.lproj in Resources */ = {isa = PBXBuildFile; fileRef = A2000023 /* en.lproj */; };
@@ -71,6 +72,7 @@
 		A2000030 /* WhatsNewView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WhatsNewView.swift; sourceTree = "<group>"; };
 		A2000031 /* NotchShapes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotchShapes.swift; sourceTree = "<group>"; };
 		A2000032 /* VorssaintNotchCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VorssaintNotchCoordinator.swift; sourceTree = "<group>"; };
+		A2000034 /* DebugLogWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DebugLogWindow.swift; sourceTree = "<group>"; };
 		A2000021 /* AppIcon.icns */ = {isa = PBXFileReference; lastKnownFileType = image.icns; path = AppIcon.icns; sourceTree = "<group>"; };
 		A2000022 /* Sounds */ = {isa = PBXFileReference; lastKnownFileType = folder; path = Sounds; sourceTree = "<group>"; };
 		A2000023 /* en.lproj */ = {isa = PBXFileReference; lastKnownFileType = folder; path = en.lproj; sourceTree = "<group>"; };
@@ -130,6 +132,7 @@
 				A2000030 /* WhatsNewView.swift */,
 				A2000031 /* NotchShapes.swift */,
 				A2000032 /* VorssaintNotchCoordinator.swift */,
+				A2000034 /* DebugLogWindow.swift */,
 				A2000021 /* AppIcon.icns */,
 				A2000022 /* Sounds */,
 				A2000023 /* en.lproj */,
@@ -252,6 +255,7 @@
 				A1000030 /* WhatsNewView.swift in Sources */,
 				A1000031 /* NotchShapes.swift in Sources */,
 				A1000032 /* VorssaintNotchCoordinator.swift in Sources */,
+				A1000034 /* DebugLogWindow.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
