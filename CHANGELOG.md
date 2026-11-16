@@ -2,6 +2,36 @@
 
 All notable changes to RememberMyWindows will be documented here.
 
+## [v15.9] — 2026-11-16
+
+### 🛡️ "Display Disconnect Restore, Vorssaint Co-existence & Notch Glass"
+
+#### 🖥️ Display Disconnect Auto-Restore
+- **Automatic recovery on unplug** — When an external monitor is disconnected, RememberMyWindows now automatically restores the saved layout for the built-in screen and shows an "Unplugged" notification in the notch pill.
+- **Off-screen artifact protection** — Windows momentarily reported at negative virtual-space coordinates during display transitions (e.g. `−1504`) are clamped to their physical screen bounds at both capture and restore time, preventing windows from being placed off-screen after unplugging.
+- **Self-healing layout data** — Existing saved layouts with corrupted coordinates are automatically repaired on app launch.
+- **Deferred cache wipe** — The AX window cache wipe is safely deferred when the monitor is removed while a full-screen Space is active, preventing stale coordinates from poisoning the restore.
+- **Disconnect timeline row** — The restore captured after unplugging appears in the Auto Layout history with a purple disconnection badge, giving you a clear baseline of what was restored.
+
+#### 🪐 Vorssaint Co-existence
+- **Third-party notch harmony** — Enable the new Vorssaint Co-existence toggle (top of Notch Notification settings) and RememberMyWindows will temporarily slide Vorssaint's Dynamic Island window off-screen while any RMW notch pill is showing, then restore it cleanly after pill dismissal.
+- **Live status badge** — The settings card shows a live "Running" / "Not Running" badge alongside the Vorssaint icon so you can confirm detection at a glance.
+- **Choreographed timing** — A 0.25 s breathing gap between Vorssaint retreating and the pill dropping, plus a 1.0 s settle after pill dismissal before Vorssaint returns, makes the hand-off feel seamless.
+
+#### 🔔 Notch Pill Glass & Hardware Shape
+- **Hardware-silhouette pill** — Notch pills now use a precise hardware notch silhouette shape, with pill shoulders that flare into the top bezel for an authentic macOS-native look.
+- **Refractive glass backdrop** — A new layered glass effect with theme-aware accent glow replaces the previous pill background.
+
+#### 🍔 Menu Bar Refinements
+- **Scrolling marquee** — Long capture titles in the menu bar dropdown now scroll when highlighted, so you always see the full title.
+- **Native shortcuts restored** — ⌘O opens the main window; ⌘Q quits — using standard macOS key equivalents.
+- **Cleaner footer** — The version row (small semibold, secondary color) sits just above a separator line and Quit, matching the visual weight of "Recent Auto Captures".
+
+#### ✨ Visual & Engine Polish
+- **Accurate thumbnails** — History card thumbnails are now drawn from screen-clamped coordinates, so an off-screen window never distorts the preview.
+- **Persistent update badge** — The "Update Available" indicator in the status menu persists across app relaunches without an extra network request.
+- **Longer settle sample** — The window geometry sampler interval increased from 150 ms to 400 ms so drags, Exposé, Stage Manager, and Space returns settle completely before recording.
+
 ## [v15.7.1] — 2026-11-03
 
 ### 🛡️ "Reliable Quick Restore"

@@ -53,7 +53,6 @@ struct OnboardingSetupView: View {
 
     @State private var hasAccessibility = AXIsProcessTrusted()
     @State private var hasFinderAutomation = false
-    @State private var hoverPrimary = false
     @State private var permissionTimer: Timer?
 
     private var allGranted: Bool { hasAccessibility && hasFinderAutomation }
@@ -237,12 +236,11 @@ struct OnboardingSetupView: View {
                     .padding(.horizontal, 22)
                     .frame(minWidth: 188, minHeight: 42)
                     .background(allGranted ? Color.green : Color.orange, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                    .shadow(color: (allGranted ? Color.green : Color.orange).opacity(0.35), radius: 10, x: 0, y: 4)
-                    .scaleEffect(hoverPrimary ? 1.03 : 1)
-                    .animation(.spring(response: 0.25, dampingFraction: 0.75), value: hoverPrimary)
                 }
-                .buttonStyle(.plain)
-                .onHover { hoverPrimary = $0 }
+                .buttonStyle(ColoredActionButtonStyle(
+                    tint: allGranted ? Color.green : Color.orange,
+                    shape: AnyShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                ))
                 .transition(.opacity)
             }
 
@@ -250,13 +248,14 @@ struct OnboardingSetupView: View {
                 Text("Skip for now".localized(selectedLanguage))
                     .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(.secondary)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 6)
-                    .background(Color.primary.opacity(0.07), in: Capsule())
+                    .padding(.horizontal, 18)
+                    .padding(.vertical, 7)
+                    .background(.ultraThinMaterial, in: Capsule())
                     .overlay {
                         Capsule()
-                            .stroke(Color.primary.opacity(0.14), lineWidth: 1)
+                            .strokeBorder(Color.primary.opacity(0.10), lineWidth: 0.75)
                     }
+                    .shadow(color: .black.opacity(0.10), radius: 4, x: 0, y: 2)
             }
             .buttonStyle(.plain)
         }
@@ -320,7 +319,10 @@ struct OnboardingSetupView: View {
                             .padding(.vertical, 4)
                             .background(iconColor.opacity(0.12), in: Capsule())
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(ColoredActionButtonStyle(
+                        tint: iconColor,
+                        shape: AnyShape(Capsule())
+                    ))
                     .padding(.top, 2)
                 }
             }
@@ -458,7 +460,6 @@ struct OnboardingGuideView: View {
     @AppStorage("themeColor") private var themeColor: ThemeColor = .default
     @Environment(\.colorScheme) private var colorScheme
     @State private var currentSlide = 0
-    @State private var hoverNext = false
     @State private var hoverPreviousArrow = false
     @State private var hoverNextArrow = false
 
@@ -550,12 +551,11 @@ struct OnboardingGuideView: View {
                     .padding(.horizontal, 24).frame(minHeight: 44)
                     .background(guideAccent)
                     .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                    .shadow(color: guideAccent.opacity(0.4), radius: 12, x: 0, y: 4)
-                    .scaleEffect(hoverNext ? 1.03 : 1.0)
-                    .animation(.spring(response: 0.25, dampingFraction: 0.75), value: hoverNext)
                 }
-                .buttonStyle(.plain)
-                .onHover { hoverNext = $0 }
+                .buttonStyle(ColoredActionButtonStyle(
+                    tint: guideAccent,
+                    shape: AnyShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                ))
             }
             .padding(.bottom, 36)
         }

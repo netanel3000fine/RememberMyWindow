@@ -688,3 +688,141 @@ enum GlassStyle {
     case row
     case card
 }
+
+/// Shared glass feedback for app-authored, color-filled action buttons.
+/// The caller supplies the button's existing tint and silhouette; this style
+/// only layers interaction feedback over the existing label.
+struct ColoredActionButtonStyle: ButtonStyle {
+    var tint: Color
+    var shape: AnyShape = AnyShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+
+    func makeBody(configuration: Configuration) -> some View {
+        ColoredActionButtonSurface(
+            content: configuration.label,
+            tint: tint,
+            shape: shape,
+            isPressed: configuration.isPressed,
+            usesNativeButtonStyle: false
+        )
+    }
+}
+
+private struct ColoredActionButtonEffectModifier: ViewModifier {
+    var tint: Color?
+    var shape: AnyShape
+
+    func body(content: Content) -> some View {
+        ColoredActionButtonSurface(
+            content: content,
+            tint: tint ?? .accentColor,
+            shape: shape,
+            isPressed: false,
+            usesNativeButtonStyle: true
+        )
+    }
+}
+
+private struct ColoredActionButtonSurface<Content: View>: View {
+    let content: Content
+    let tint: Color
+    let shape: AnyShape
+    let isPressed: Bool
+    let usesNativeButtonStyle: Bool
+
+    @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
+    @Environment(\.minimalVisualAnimationsEnabled) private var minimalVisualAnimationsEnabled
+    @Environment(\.isEnabled) private var isEnabled
+    @State private var isHovered = false
+
+    private var isInteractionAnimated: Bool {
+        !minimalVisualAnimationsEnabled && !accessibilityReduceMotion
+    }
+
+    private var isActivelyHovered: Bool {
+        isEnabled && isHovered
+    }
+
+    private var glassTintOpacity: Double {
+        guard isEnabled else { return 0.22 }
+        if isPressed { return 0.50 }
+        return isActivelyHovered ? 0.48 : 0.38
+    }
+
+    @ViewBuilder
+    private var materialSurface: some View {
+        if #available(macOS 26.0, *), !usesNativeButtonStyle {
+            content
+                .glassEffect(
+                    .regular.tint(tint.opacity(glassTintOpacity)).interactive(),
+                    in: shape
+                )
+        } else if #available(macOS 26.0, *), usesNativeButtonStyle {
+            // Native prominent controls already adopt Liquid Glass and their
+            // own pressed feedback on macOS 26; avoid stacking a second glass
+            // surface over the system control.
+            content
+        } else {
+            content
+                .overlay {
+                    shape
+                        .fill(.ultraThinMaterial)
+                        .opacity(isEnabled ? (isActivelyHovered ? 0.15 : 0.09) : 0.04)
+                        .allowsHitTesting(false)
+                }
+        }
+    }
+
+    var body: some View {
+        materialSurface
+            .overlay {
+                shape
+                    .fill(
+                        LinearGradient(
+                            colors: [
+                                Color.white.opacity(isActivelyHovered ? 0.16 : 0.10),
+                                Color.white.opacity(0.025),
+                                Color.black.opacity(isPressed ? 0.055 : 0.01)
+                            ],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+                    .allowsHitTesting(false)
+            }
+            .overlay {
+                shape
+                    .stroke(
+                        Color.white.opacity(isActivelyHovered ? 0.30 : 0.18),
+                        lineWidth: 0.8
+                    )
+                    .allowsHitTesting(false)
+            }
+            .overlay {
+                if isPressed && !usesNativeButtonStyle {
+                    shape
+                        .fill(Color.black.opacity(0.045))
+                        .allowsHitTesting(false)
+                }
+            }
+            .shadow(
+                color: tint.opacity(isActivelyHovered ? 0.26 : 0.14),
+                radius: isActivelyHovered ? 8 : 5,
+                x: 0,
+                y: 2
+            )
+            .contentShape(shape)
+            .onHover { isHovered = isEnabled && $0 }
+            .animation(isInteractionAnimated ? .easeOut(duration: 0.15) : nil, value: isActivelyHovered)
+            .animation(isInteractionAnimated ? .easeOut(duration: 0.09) : nil, value: isPressed)
+    }
+}
+
+extension View {
+    /// Adds the shared glass/rim treatment without replacing a native button style.
+    func coloredActionButtonEffect(
+        tint: Color? = nil,
+        shape: AnyShape = AnyShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+    ) -> some View {
+        modifier(ColoredActionButtonEffectModifier(tint: tint, shape: shape))
+    }
+}

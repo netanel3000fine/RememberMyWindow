@@ -102,9 +102,11 @@ struct WhatsNewView: View {
             .padding(.horizontal, 28)
             .frame(minWidth: 196, minHeight: 42)
             .background(accent, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-            .shadow(color: accent.opacity(0.35), radius: 10, x: 0, y: 4)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(ColoredActionButtonStyle(
+            tint: accent,
+            shape: AnyShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        ))
         .keyboardShortcut(.defaultAction)
         .accessibilityLabel(Text("Continue".localized(appLanguage)))
         .padding(.top, 10)

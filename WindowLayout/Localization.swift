@@ -15,6 +15,14 @@ extension AppLanguage {
         case .auto:    return Locale.current.language.languageCode?.identifier == "he"
         }
     }
+
+    var locale: Locale {
+        switch self {
+        case .hebrew:  return Locale(identifier: "he")
+        case .english: return Locale(identifier: "en")
+        case .auto:    return Locale.current
+        }
+    }
 }
 
 extension String {
@@ -395,6 +403,11 @@ private let translationDict: [String: String] = [
     "Notch Notification": "התראות מגרעת",
     "macOS Notification Center": "מרכז העדכונים של macOS",
     "Welcome Notch Pill": "התראת פתיחה במגרעת",
+    "Coexist with Vorssaint Notch": "דו-קיום עם מגרעת Vorssaint",
+    "Temporarily hides Vorssaint's notch island while RememberMyWindows displays any notch pill.": "מסתיר זמנית את אי המגרעת של Vorssaint בזמן שמוצגת התראת מגרעת של RememberMyWindows.",
+    "Temporarily hides Vorssaint's notch island with a smooth fade while RememberMyWindows displays any notch pill.": "מסתיר זמנית את אי המגרעת של Vorssaint בזמן שמוצגת התראת מגרעת של RememberMyWindows.",
+    "Running": "פועל",
+    "Not Running": "לא פועל",
     "Shows on the first eligible restore after launch, for a layout not among the last two completed restores, or when 8 hours have passed since the pill last appeared.": "מוצגת בשחזור המתאים הראשון לאחר הפעלת האפליקציה, עבור פריסה שאינה בין שתי הפריסות ששוחזרו במלואן לאחרונה, או כאשר חלפו 8 שעות מאז הופעתה האחרונה.",
     "Show layout restore alerts from the notch": "הצג התראות שחזור מהמגרעת",
     "Show layout restore alerts sliding smoothly down from the MacBook notch": "מציג התראות שחזור מרהיבות המחליקות בצורה נעימה אל מחוץ למגרעת המסך (Notch)",
@@ -409,6 +422,10 @@ private let translationDict: [String: String] = [
     "Check for Updates Automatically": "בדוק אם קיימים עדכונים באופן אוטומטי",
     "Checks for new GitHub releases once daily when the app starts": "בודק אם קיימות גרסאות חדשות ב-GitHub פעם ביום עם הפעלת היישום",
     "Check for Updates…": "בדוק אם קיימים עדכונים…",
+    " (Update Available)": " (עדכון זמין)",
+    "Software Update": "עדכון תוכנה",
+    "Checking for Updates…": "בודק אם קיימים עדכונים…",
+    "Connecting to GitHub to check for the latest version.": "מתחבר ל־GitHub כדי לבדוק אם קיימת הגרסה החדשה ביותר.",
     "A new version of RememberMyWindows is available!": "גרסה חדשה של RememberMyWindows זמינה!",
     "Version %@ is now available—you have %@. Would you like to download it now?": "גרסה %@ זמינה כעת — ברשותך %@. האם להוריד אותה עכשיו?",
     "No release notes were provided.": "לא סופקו הערות לגרסה זו.",
@@ -590,6 +607,10 @@ private let translationDict: [String: String] = [
     "Latest (%@) · 1 window": "האחרון (%@) · חלון 1",
     "Latest (%@) · %d windows": "האחרון (%@) · %d חלונות",
     "Latest (%@)": "האחרון (%@)",
+    "Unplugged": "נותק",
+    "Unplugged (%@) · 1 window": "נותק (%@) · חלון 1",
+    "Unplugged (%@) · %d windows": "נותק (%@) · %d חלונות",
+    "Unplugged (%@)": "נותק (%@)",
     "%@ · 1 window": "%@ · חלון 1",
     "%@ · %d windows": "%@ · %d חלונות",
     "Apps changed: %@": "היישומים שהשתנו: %@",
@@ -623,6 +644,8 @@ private let translationDict: [String: String] = [
     "Replay the onboarding walkthrough and setup guide": "הפעל מחדש את סיור ההיכרות ומדריך ההגדרה",
     "Replay Tour": "הפעל סיור מחדש",
     // Menu Bar Icon Customization
+    "Menu Bar": "שורת התפריטים",
+    "Menu Options": "אפשרויות תפריט",
     "Menu Bar Icon Style": "סגנון סמל שורת התפריטים",
     "Choose the resting and active icons shown in the macOS status bar": "בחר את הסמלים המוצגים בשורת התפריטים במצב מנוחה ובמצב פעולה",
     "Match Accent Theme Color": "התאם לצבע ערכת הנושא",
@@ -726,9 +749,5 @@ private let reverseDict: [String: String] = [
 var currentLocale: Locale {
     let langStr = UserDefaults.standard.string(forKey: "appLanguage") ?? "system"
     let lang = AppLanguage(rawValue: langStr) ?? .auto
-    switch lang {
-    case .hebrew:  return Locale(identifier: "he")
-    case .english: return Locale(identifier: "en")
-    case .auto:    return Locale.current
-    }
+    return lang.locale
 }

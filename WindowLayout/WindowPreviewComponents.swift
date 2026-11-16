@@ -34,12 +34,13 @@ struct WindowPreviewIcon: View {
                 let scaleX = canvasW / screenFrame.width
                 let scaleY = canvasH / screenFrame.height
 
-                let relX = (record.globalFrame.origin.x - screenFrame.origin.x) * scaleX
+                let displayFrame = record.previewDisplayFrame
+                let relX = (displayFrame.origin.x - screenFrame.origin.x) * scaleX
                 let relY = (screenFrame.height
-                            - (record.globalFrame.origin.y - screenFrame.origin.y)
-                            - record.globalFrame.height) * scaleY
-                let winW  = min(canvasW, max(6, record.globalFrame.width  * scaleX))
-                let winH  = min(canvasH, max(5, record.globalFrame.height * scaleY))
+                            - (displayFrame.origin.y - screenFrame.origin.y)
+                            - displayFrame.height) * scaleY
+                let winW  = min(canvasW, max(6, displayFrame.width  * scaleX))
+                let winH  = min(canvasH, max(5, displayFrame.height * scaleY))
                 let isFilled = winW >= canvasW * 0.92 && winH >= canvasH * 0.92
                 let winCorner: CGFloat = isFilled ? cornerR : 2
 
@@ -80,7 +81,12 @@ struct WindowPreviewIcon: View {
                 .animation(.spring(response: 0.3, dampingFraction: 0.7), value: record.globalFrame)
             }
         }
-        .frame(width: displayW, height: displayH)
+        // Flexible frame: honours an explicit parent-provided size (e.g. WindowGridCard's 68×44)
+        // while defaulting to displayW×displayH when no size is imposed.
+        .frame(
+            minWidth: displayW, idealWidth: displayW, maxWidth: .infinity,
+            minHeight: displayH, idealHeight: displayH, maxHeight: .infinity
+        )
     }
 }
 
@@ -685,25 +691,36 @@ struct LayoutPreviewView: View {
         switch indicator {
         case .addedWindows, .sameWindowCount:
             return true
-        case .history:
+        case .history, .displayConnected, .displayDisconnected:
             return false
         }
     }
 
     private var effectiveMinimalVisualAnimations: Bool {
-        // History captures always use the full animation, even when the
+        // History and Display Connection/Disconnection captures always use the full animation, even when the
         // global reduced-animations setting is ON.
         if case .history = captureIndicator { return false }
+        if case .displayConnected = captureIndicator { return false }
+        if case .displayDisconnected = captureIndicator { return false }
         return isMinimalVisualAnimations ?? minimalVisualAnimationsEnabled
     }
 
     private var usesFlatPreview: Bool {
-        // Isolated captures (green + / blue resize) always use the flat 2D canvas.
-        if isIsolatedCapture { return true }
-        // History captures use the flat 2D canvas to execute the full sequential staggered window reveal.
-        if case .history = captureIndicator { return true }
-        // Flat 2D canvas is used whenever minimal animations is enabled.
-        return isMinimalVisualAnimations ?? minimalVisualAnimationsEnabled
+        // If Minimal Visuals is ON, always use flat 2D canvas
+        if isMinimalVisualAnimations ?? minimalVisualAnimationsEnabled {
+            return true
+        }
+        // Isolated captures (green + / blue resize) where only specific windows are highlighted always use flat 2D
+        if isIsolatedCapture {
+            return true
+        }
+        // For the main Window Arrangement preview with full windows (and when not browsing earlier captures),
+        // activate the rich 3D holographic perspective hover effect.
+        if isWindowArrangementPreview && enable3DHover {
+            return false
+        }
+        // Compact thumbnails and history list fallbacks use the flat 2D canvas.
+        return true
     }
 
     private func isTriggeringRecord(_ record: WindowRecord) -> Bool {
@@ -1042,10 +1059,11 @@ struct LayoutPreviewView: View {
         let isHovered = record.id == hoveredRecordID
         let isHighlighted = isSelected || isHovered
         let isMinimal = isMenubarThumbnail
-        let x = offsetX + (record.globalFrame.origin.x - boundingBox.origin.x) * scale
-        let y = offsetY + (boundingBox.height - (record.globalFrame.origin.y - boundingBox.origin.y + record.globalFrame.height)) * scale
-        let w = record.globalFrame.width * scale
-        let h = record.globalFrame.height * scale
+        let displayFrame = record.previewDisplayFrame
+        let x = offsetX + (displayFrame.origin.x - boundingBox.origin.x) * scale
+        let y = offsetY + (boundingBox.height - (displayFrame.origin.y - boundingBox.origin.y + displayFrame.height)) * scale
+        let w = displayFrame.width * scale
+        let h = displayFrame.height * scale
         
         let isFullScreen = record.isFullScreenMode
         // Match Theme Colors (Use high-contrast slate for Black theme so preview window cards remain visible)
@@ -1054,7 +1072,6 @@ struct LayoutPreviewView: View {
         let winCorner: CGFloat = max(4, 8 * scale)
         let baseSize: CGFloat = min(max(w * 0.24, 20.0), 30.0)
         let iconSize: CGFloat = min(baseSize, max(8.0, min(w - 3, h - 3)))
-        let titleBarHeight: CGFloat = max(iconSize + 3, 14 * scale)
         let revealScale: CGFloat = !isMinimal && isWaitingToReveal ? 0.97 : 1.0
         let revealOffsetY: CGFloat = !isMinimal && isWaitingToReveal ? 6.0 : 0.0
         let foregroundProgress: Double = {
@@ -1124,14 +1141,6 @@ struct LayoutPreviewView: View {
                 }
                 .shadow(color: isHighlighted ? baseTint.opacity(0.5) : Color.black.opacity(0.35), radius: isHighlighted ? 6 : 2.5, x: 0, y: 1)
             
-            // Thin title bar divider line if window is tall enough (only for non-fullscreen windows)
-            if !isFullScreen && h > titleBarHeight + 4 {
-                Rectangle()
-                    .fill(baseTint.opacity(0.35))
-                    .frame(height: 0.75)
-                    .offset(y: titleBarHeight)
-            }
-
             // Centered macOS native full-screen glyph in the middle of the window dimensions
             if isFullScreen {
                 let glyphSize = min(max(min(w, h) * 0.26, 9), min(w - 2, h - 2), 30)
@@ -1729,10 +1738,11 @@ private struct WindowPreviewTileView: View {
         let focusLift: CGFloat = isFocused ? 18.0 : 0
         let peelLift: CGFloat = is3D ? peelData.liftY : 0.0
         
-        let x = offsetX + (record.globalFrame.origin.x - boundingBox.origin.x) * scale
-        let y = offsetY + (boundingBox.height - (record.globalFrame.origin.y - boundingBox.origin.y + record.globalFrame.height)) * scale
-        let w = max(8, record.globalFrame.width * scale)
-        let h = max(8, record.globalFrame.height * scale)
+        let displayFrame = record.previewDisplayFrame
+        let x = offsetX + (displayFrame.origin.x - boundingBox.origin.x) * scale
+        let y = offsetY + (boundingBox.height - (displayFrame.origin.y - boundingBox.origin.y + displayFrame.height)) * scale
+        let w = max(8, displayFrame.width * scale)
+        let h = max(8, displayFrame.height * scale)
         
         // Base resting position in the 3D stack — fan direction flips based on which side we're viewing from
         let baseX = x + (is3D ? layerDirectionX * layerOffset * 0.9 : 0)
@@ -1830,15 +1840,6 @@ private struct WindowPreviewTileView: View {
                         y: is3D ? (CGFloat(rank) * 2.2 - peelLift * 0.25) : 0
                     )
                 
-                // ── Titlebar divider line ───────────────────────────────
-                if !isFullScreen && h >= 14 {
-                    let titleBarH: CGFloat = max(6, h * 0.14)
-                    Rectangle()
-                        .fill(baseTint.opacity(strokeOpacity * 0.35))
-                        .frame(height: 0.75)
-                        .offset(y: titleBarH)
-                }
-
                 // Centered macOS native full-screen glyph in the middle of the window dimensions
                 if isFullScreen {
                     let glyphSize = min(max(min(w, h) * 0.26, 9), min(w - 2, h - 2), 30)
@@ -1957,11 +1958,21 @@ private struct WindowPreviewTileView: View {
 /// Draws proportional monitor-outline rectangles for each display in a snapshot's screen config.
 /// Single display → one rectangle. Two displays side-by-side → two rectangles, etc.
 struct ScreenLayoutThumbnail: View {
+    enum BadgeStatus: String, Hashable {
+        case live = "Live"
+
+        func localizedTitle(for language: AppLanguage) -> String {
+            rawValue.localized(language)
+        }
+    }
+
     let screenKey: String
     let tint: Color
     let isLive: Bool
     var isHighlighted: Bool = false
+    var badgeStatus: BadgeStatus? = nil
     @Environment(\.colorScheme) private var colorScheme
+    @AppStorage("appLanguage") private var appLanguage: AppLanguage = .auto
 
     /// Fixed canvas size for the thumbnail area
     private let canvasW: CGFloat = 34
@@ -2031,28 +2042,61 @@ struct ScreenLayoutThumbnail: View {
                         .offset(x: x, y: y)
                 }
 
-                // Small active layout indicator dot in top-right corner
-                if active {
-                    Circle()
-                        .fill(tint == .black ? neutralColor : tint)
-                        .frame(width: 5, height: 5)
-                        .shadow(color: neutralColor.opacity(0.85), radius: 2)
-                        .shadow(color: neutralColor.opacity(0.5), radius: 1, x: 0, y: 1)
-                        .position(x: canvasW, y: 0)
-                }
             }
             .frame(width: canvasW, height: canvasH)
+            .overlay(alignment: .topTrailing) {
+                if let badgeStatus {
+                    statusBadge(for: badgeStatus)
+                        // Hang the badge ~3pt above the thumbnail's top edge
+                        .offset(x: 2, y: -3)
+                }
+            }
         )
+    }
+
+    private func statusBadge(for status: BadgeStatus) -> some View {
+        let label = status.localizedTitle(for: appLanguage)
+        return Text(label)
+        .font(.system(size: 7.25, weight: .semibold, design: .rounded))
+        .lineLimit(1)
+        .minimumScaleFactor(0.7)
+        .foregroundStyle(.primary)
+        .padding(.horizontal, 3)
+        .padding(.vertical, 1.5)
+        .background(.regularMaterial, in: Capsule())
+        .overlay {
+            Capsule()
+                .strokeBorder(tint.opacity(0.55), lineWidth: 0.5)
+        }
+        .shadow(color: .black.opacity(0.16), radius: 1, x: 0, y: 0.5)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(Text(label))
     }
 
     private static var thumbnailCache: [String: NSImage] = [:]
 
     /// Renders the layout thumbnail as a compact, crisp NSImage properly dimensioned for native NSMenuItems (20x14 pt).
     @MainActor
-    static func renderImage(screenKey: String, tint: Color, isLive: Bool = false) -> NSImage? {
+    static func renderImage(
+        screenKey: String,
+        tint: Color,
+        isLive: Bool = false,
+        badgeStatus: BadgeStatus? = nil,
+        language: AppLanguage = .auto
+    ) -> NSImage? {
         let appearanceName = NSApp?.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua])
         let appearanceKey = appearanceName == .darkAqua ? "dark" : "light"
-        let cacheKey = "\(screenKey)_\(isLive)_\(appearanceKey)"
+        let badgeLabel = badgeStatus?.localizedTitle(for: language)
+        let badgeColor = badgeLabel == nil ? nil : resolvedBadgeColor(for: tint)
+        let tintKey = badgeColor.map { colorCacheKey(for: $0) } ?? ""
+        let cacheKey = [
+            screenKey,
+            isLive ? "live" : "idle",
+            badgeStatus?.rawValue ?? "none",
+            badgeLabel ?? "",
+            tintKey,
+            appearanceKey
+        ].joined(separator: "|")
         if let cached = thumbnailCache[cacheKey] {
             return cached
         }
@@ -2102,11 +2146,15 @@ struct ScreenLayoutThumbnail: View {
                 ctx.strokePath()
             }
 
-            if isLive {
-                let dotRect = CGRect(x: canvasW - 4.5, y: canvasH - 4.5, width: 3.5, height: 3.5)
-                ctx.addEllipse(in: dotRect)
-                ctx.setFillColor(neutralColor.cgColor)
-                ctx.fillPath()
+            if let badgeLabel, let badgeColor {
+                drawStatusBadge(
+                    label: badgeLabel,
+                    color: badgeColor,
+                    canvasW: canvasW,
+                    canvasH: canvasH,
+                    language: language,
+                    in: ctx
+                )
             }
 
             return true
@@ -2114,6 +2162,118 @@ struct ScreenLayoutThumbnail: View {
         image.isTemplate = false
         thumbnailCache[cacheKey] = image
         return image
+    }
+
+    private static func resolvedBadgeColor(for tint: Color) -> NSColor {
+        let color = NSColor(tint)
+        if let appearance = NSApp?.effectiveAppearance {
+            var resolvedColor = color
+            appearance.performAsCurrentDrawingAppearance {
+                resolvedColor = color.usingColorSpace(.deviceRGB) ?? color
+            }
+            return resolvedColor
+        }
+        return color.usingColorSpace(.deviceRGB) ?? color
+    }
+
+    private static func colorCacheKey(for color: NSColor) -> String {
+        guard let rgbColor = color.usingColorSpace(.deviceRGB) else {
+            return color.description
+        }
+
+        return String(
+            format: "%.3f-%.3f-%.3f-%.3f",
+            rgbColor.redComponent,
+            rgbColor.greenComponent,
+            rgbColor.blueComponent,
+            rgbColor.alphaComponent
+        )
+    }
+
+    private static func drawStatusBadge(
+        label: String,
+        color: NSColor,
+        canvasW: CGFloat,
+        canvasH: CGFloat,
+        language: AppLanguage,
+        in context: CGContext
+    ) {
+        let dotSize: CGFloat = 1.5
+        let textGap: CGFloat = 1.0
+        let horizontalInset: CGFloat = 1.6
+        let maxBadgeWidth = canvasW - 1
+        let maxTextWidth = maxBadgeWidth - (horizontalInset * 2) - dotSize - textGap
+        var fontSize: CGFloat = 4.5
+        var font = NSFont.systemFont(ofSize: fontSize, weight: .semibold)
+        var textSize = (label as NSString).size(withAttributes: [.font: font])
+
+        while textSize.width > maxTextWidth && fontSize > 2.4 {
+            fontSize -= 0.2
+            font = NSFont.systemFont(ofSize: fontSize, weight: .semibold)
+            textSize = (label as NSString).size(withAttributes: [.font: font])
+        }
+
+        let badgeWidth = min(
+            maxBadgeWidth,
+            textSize.width + (horizontalInset * 2) + dotSize + textGap
+        )
+        let badgeHeight = max(6.8, textSize.height + 2.2)
+        let isRightToLeft = language.usesHebrew
+        let badgeX = isRightToLeft ? 0.5 : canvasW - badgeWidth - 0.5
+        let badgeRect = CGRect(
+            x: badgeX,
+            y: canvasH - badgeHeight - 0.5,
+            width: badgeWidth,
+            height: badgeHeight
+        )
+        let badgePath = CGPath(
+            roundedRect: badgeRect,
+            cornerWidth: badgeHeight / 2,
+            cornerHeight: badgeHeight / 2,
+            transform: nil
+        )
+
+        context.addPath(badgePath)
+        context.setFillColor(NSColor.windowBackgroundColor.withAlphaComponent(0.96).cgColor)
+        context.fillPath()
+
+        context.addPath(badgePath)
+        context.setStrokeColor(color.withAlphaComponent(0.55).cgColor)
+        context.setLineWidth(0.45)
+        context.strokePath()
+
+        let dotX = isRightToLeft
+            ? badgeRect.maxX - horizontalInset - dotSize
+            : badgeRect.minX + horizontalInset
+        let dotRect = CGRect(
+            x: dotX,
+            y: badgeRect.midY - dotSize / 2,
+            width: dotSize,
+            height: dotSize
+        )
+        context.setFillColor(color.cgColor)
+        context.fillEllipse(in: dotRect)
+
+        let textX = isRightToLeft
+            ? badgeRect.minX + horizontalInset
+            : dotX + dotSize + textGap
+        let textRect = CGRect(
+            x: textX,
+            y: badgeRect.minY + (badgeRect.height - textSize.height) / 2,
+            width: min(textSize.width, maxTextWidth),
+            height: textSize.height
+        )
+        let paragraphStyle = NSMutableParagraphStyle()
+        paragraphStyle.alignment = .center
+        paragraphStyle.lineBreakMode = .byClipping
+        NSAttributedString(
+            string: label,
+            attributes: [
+                .font: font,
+                .foregroundColor: NSColor.labelColor,
+                .paragraphStyle: paragraphStyle
+            ]
+        ).draw(in: textRect)
     }
 }
 
@@ -2381,6 +2541,7 @@ struct MenuWindowListView: View {
 
 struct AutoSavePreviewCardView: View {
     let snapshot: LayoutSnapshot
+    let menuWidth: CGFloat
     var indicator: AutoLayoutCaptureIndicator = .sameWindowCount
     let activityApps: [AutoLayoutCaptureAppIcon]
     var triggeringRecordIDs: Set<UUID> = []
@@ -2390,12 +2551,12 @@ struct AutoSavePreviewCardView: View {
     @AppStorage("minimalVisualAnimations") private var minimalVisualAnimations: Bool = true
 
     private var triggeringBundleIDs: Set<String> {
-        guard indicator != .history else { return [] }
+        guard indicator != .history && indicator != .displayConnected && indicator != .displayDisconnected else { return [] }
         return Set(activityApps.map(\.bundleID).filter { !$0.isEmpty })
     }
 
     private var triggeringAppNames: Set<String> {
-        guard indicator != .history else { return [] }
+        guard indicator != .history && indicator != .displayConnected && indicator != .displayDisconnected else { return [] }
         return Set(activityApps.compactMap(\.appName).filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })
     }
 
@@ -2405,10 +2566,15 @@ struct AutoSavePreviewCardView: View {
             // second button competing with the thumbnail.
             Button(action: onRestore) {
                 HStack(spacing: 6) {
-                    Image(systemName: "clock.arrow.circlepath")
+                    Image(systemName: indicator == .displayConnected ? "display.2" : (indicator == .displayDisconnected ? "laptopcomputer" : "clock.arrow.circlepath"))
                         .mainWindowSymbolAnimation(.wiggleByLayer, capturesClicks: false)
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(tint)
+                        .symbolRenderingMode(.monochrome)
+                        .font(.system(size: 11, weight: indicator == .displayDisconnected ? .regular : .semibold))
+                        .foregroundStyle(
+                            indicator == .displayDisconnected
+                                ? AnyShapeStyle(.secondary)
+                                : AnyShapeStyle(tint)
+                        )
                     Text("Restore this layout".localized(language))
                         .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(.primary)
@@ -2493,7 +2659,7 @@ struct AutoSavePreviewCardView: View {
                 .allowsHitTesting(false)
         }
         .padding(8)
-        .frame(width: 320, height: 210)
+        .frame(width: menuWidth, height: 210)
         .environment(\.minimalVisualAnimationsEnabled, minimalVisualAnimations)
     }
 }

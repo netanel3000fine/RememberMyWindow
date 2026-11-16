@@ -220,9 +220,11 @@ public struct NotchWelcomePillView: View {
             height = availableHeight
         }
         let scale = height / NotchWelcomePillLayout.referenceHelloHeight
+        let shoulder = NotchShapeLayout.shoulder(forHeight: pillHeight)
+        let bodyWidth = max(1, pillWidth - shoulder * 2)
         let width = min(
             NotchWelcomePillLayout.referenceHelloWidth * scale,
-            max(1, pillWidth - 24)
+            max(1, bodyWidth - 24)
         )
         return CGSize(width: width, height: height)
     }
@@ -244,37 +246,13 @@ public struct NotchWelcomePillView: View {
     }
 
     public var body: some View {
-        ZStack(alignment: .bottom) {
-            // MARK: 1. Notch-Anchored Glass Pill Body
-            ZStack {
-                // Smoky frosted black glass backing
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .fill(Color.black.opacity(0.92))
-                    .padding(.top, -100)
-
-                // Specular outer boundary
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .stroke(Color.white.opacity(appeared ? 0.38 : 0.12), lineWidth: 1.0)
-                    .padding(.top, -100)
-                    .padding(.bottom, 0.5)
-
-                // Iridescent accent edge rim
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .stroke(
-                        LinearGradient(
-                            colors: [
-                                .white.opacity(appeared ? 0.35 : 0.1),
-                                accentColor.opacity(appeared ? 0.6 : 0.15),
-                                .white.opacity(appeared ? 0.35 : 0.1)
-                            ],
-                            startPoint: .leading,
-                            endPoint: .trailing
-                        ),
-                        lineWidth: 1.0
-                    )
-                    .padding(.top, -100)
-                    .padding(.bottom, 0.5)
-            }
+        ZStack(alignment: .top) {
+            // MARK: 1. Notch-Anchored Glass Pill Body (Hardware Shoulders & Refractive Glass Lip)
+            NotchGlassBackdropView(
+                cornerRadius: 18,
+                accentColor: accentColor,
+                appeared: appeared
+            )
             .frame(width: pillWidth, height: pillHeight)
             .scaleEffect(
                 x: appeared ? 1.0 : 0.88,
@@ -305,12 +283,12 @@ public struct NotchWelcomePillView: View {
                 }
             }
             .padding(.bottom, NotchWelcomePillLayout.contentBottomInset)
-            .frame(width: pillWidth, alignment: .center)
+            .frame(width: pillWidth, height: pillHeight, alignment: .bottom)
             .opacity(appeared ? 1.0 : 0.0)
             .offset(y: appeared ? 0 : -6)
             .animation(.spring(response: 0.38, dampingFraction: 0.84), value: showSubtitle)
         }
-        .frame(width: pillWidth, height: pillHeight, alignment: .top)
+        .frame(width: pillWidth, height: pillHeight + 20.0, alignment: .top)
         .opacity(appeared ? 1.0 : 0.0)
         .animation(appearanceAnimation, value: appeared)
         .onAppear {
@@ -378,6 +356,8 @@ public struct NotchWelcomePillView: View {
         let glowOpacity = 0.62
         let glowLineWidth: CGFloat = 4.25
         let glowBlurRadius: CGFloat = 2.75
+        let tubeLineWidth: CGFloat = 2.5
+        let coreLineWidth: CGFloat = 1.15
 
         ZStack {
             // Layer 1: Ambient soft bloom / chromatic aura
@@ -403,7 +383,15 @@ public struct NotchWelcomePillView: View {
                         startPoint: .topLeading,
                         endPoint: .bottomTrailing
                     ),
-                    style: StrokeStyle(lineWidth: 2.3, lineCap: .round, lineJoin: .round)
+                    style: StrokeStyle(lineWidth: tubeLineWidth, lineCap: .round, lineJoin: .round)
+                )
+
+            // An accent wash tints the white tube itself without competing with its glow.
+            shape
+                .trim(from: 0, to: writeProgress)
+                .stroke(
+                    accentColor.opacity(0.28),
+                    style: StrokeStyle(lineWidth: tubeLineWidth, lineCap: .round, lineJoin: .round)
                 )
 
             // Layer 3: Specular crystal core
@@ -411,7 +399,15 @@ public struct NotchWelcomePillView: View {
                 .trim(from: 0, to: writeProgress)
                 .stroke(
                     Color.white.opacity(0.92),
-                    style: StrokeStyle(lineWidth: 1.05, lineCap: .round, lineJoin: .round)
+                    style: StrokeStyle(lineWidth: coreLineWidth, lineCap: .round, lineJoin: .round)
+                )
+
+            // Keep the bright center white-forward while letting the selected theme color show through.
+            shape
+                .trim(from: 0, to: writeProgress)
+                .stroke(
+                    accentColor.opacity(0.2),
+                    style: StrokeStyle(lineWidth: coreLineWidth, lineCap: .round, lineJoin: .round)
                 )
         }
     }
@@ -424,6 +420,7 @@ public final class NotchWelcomeWindow: NSPanel {
     private let dynamicPillHeight: CGFloat
     private let subsequentSubtitles: [String]
     private var dismissTimer: Timer?
+    public var onDismissCompleted: (() -> Void)?
 
     public init(subtitle: String, subsequentSubtitles: [String] = []) {
         self.subsequentSubtitles = subsequentSubtitles
@@ -441,14 +438,16 @@ public final class NotchWelcomeWindow: NSPanel {
 
         let intrinsicWidth: CGFloat = 285.0
         let minimumWidth = notchWidth > 0 ? notchWidth + clearance * 2 : 0
-        self.pillWidth = max(intrinsicWidth, minimumWidth)
+        let bodyWidth = max(intrinsicWidth, minimumWidth)
         
         let notchDepth = screen.safeAreaInsets.top > 0 ? screen.safeAreaInsets.top : 24.0
         // Leave room below the notch for the complete script, its stroke, and the subtitle.
         self.dynamicPillHeight = notchDepth + 60.0
+        let shoulder = NotchShapeLayout.shoulder(forHeight: self.dynamicPillHeight)
+        self.pillWidth = bodyWidth + shoulder * 2
 
         super.init(
-            contentRect: NSRect(x: 0, y: 0, width: self.pillWidth, height: self.dynamicPillHeight),
+            contentRect: NSRect(x: 0, y: 0, width: self.pillWidth, height: self.dynamicPillHeight + 20.0),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
@@ -475,9 +474,11 @@ public final class NotchWelcomeWindow: NSPanel {
         setFrame(NSRect(x: originX, y: visibleY, width: self.pillWidth, height: windowHeight), display: true)
         self.alphaValue = 1.0
 
+        let shoulder = NotchShapeLayout.shoulder(forHeight: dynamicPillHeight)
+        let bodyWidth = max(1, self.pillWidth - shoulder * 2)
         let queuedSubtitles = NotchWelcomePillTextQueue.fit(
             [subtitle] + subsequentSubtitles,
-            toWidth: pillWidth
+            toWidth: bodyWidth
         )
         let rootView = NotchWelcomePillView(
             subtitle: queuedSubtitles.first ?? "",
@@ -515,8 +516,10 @@ public final class NotchWelcomeWindow: NSPanel {
         dismissTimer = nil
         NotificationCenter.default.post(name: NSNotification.Name("NotchDismiss"), object: nil)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+            let callback = self?.onDismissCompleted
             self?.close()
             self?.contentView = nil
+            callback?()
         }
     }
 }

@@ -71,7 +71,7 @@ struct WindowRecord: Codable, Identifiable {
     /// macOS system-level window ID (unique and stable for the lifetime of this window).
     var cgWindowID: CGWindowID? = nil
     /// Frame in global screen coordinates (origin = bottom-left of primary screen).
-    let globalFrame: CGRect
+    var globalFrame: CGRect
     /// Screen fingerprint the window was on when saved.
     let screenKey: String
     /// The frame of the screen this window was on (in global coordinates).
@@ -85,6 +85,20 @@ struct WindowRecord: Codable, Identifiable {
     var isFullScreenMode: Bool = false
     /// True when this window was in native macOS full-screen mode at capture time.
     var isNativeFullScreen: Bool = false
+
+    /// Safe on-screen display frame for UI preview rendering, clamped so transient
+    /// off-screen space-sliding offsets never distort visual thumbnails.
+    var previewDisplayFrame: CGRect {
+        let screen = screenFrame ?? CGRect(x: 0, y: 0, width: 1440, height: 900)
+        let clampedX = max(screen.minX, min(screen.maxX - min(globalFrame.width, screen.width), globalFrame.origin.x))
+        let clampedY = max(screen.minY, min(screen.maxY - min(globalFrame.height, screen.height), globalFrame.origin.y))
+        return CGRect(
+            x: clampedX,
+            y: clampedY,
+            width: min(globalFrame.width, screen.width),
+            height: min(globalFrame.height, screen.height)
+        )
+    }
 
     /// Frame relative to the screen's own coordinate space.
     func frameRelativeTo(screen: NSScreen) -> CGRect {
@@ -547,6 +561,9 @@ struct LayoutStore: Codable {
     /// When true, single app restore shows a quiet "Already in place" banner with no sound if the window was already in position.
     var quietSingleRestoreWhenInPlace: Bool = true
 
+    /// When true, temporarily hides Vorssaint's "Dynamic Island" notch window while RememberMyWindows displays any notch pill.
+    var coexistWithVorssaintNotch: Bool = false
+
 
     // Custom decode so new Bool flags fall back to their defaults when the key
     // is absent in an older persisted JSON, instead of throwing and wiping the store.
@@ -636,6 +653,7 @@ struct LayoutStore: Codable {
         welcomeNotchPillEnabled               = try c.decodeIfPresent(Bool.self,                   forKey: .welcomeNotchPillEnabled) ?? true
         welcomeNotchPillSoundEnabled          = try c.decodeIfPresent(Bool.self,                   forKey: .welcomeNotchPillSoundEnabled) ?? notchSoundOnFullRestore
         welcomeNotchPillSoundName             = migrateSound(try c.decodeIfPresent(String.self, forKey: .welcomeNotchPillSoundName), fallback: SystemSound.welcome.rawValue)
+        coexistWithVorssaintNotch             = try c.decodeIfPresent(Bool.self,                   forKey: .coexistWithVorssaintNotch) ?? false
     }
 
     init() {}

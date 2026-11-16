@@ -86,6 +86,7 @@ final class NotchNotificationWindow: NSPanel {
     private let pillWidth: CGFloat
     private let data: NotificationData
     private var dismissTimer: Timer?
+    var onDismissCompleted: (() -> Void)?
 
     static func isAllowedSubtitle(_ subtitle: String) -> Bool {
         let trimmed = subtitle.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -111,11 +112,13 @@ final class NotchNotificationWindow: NSPanel {
         // Clear the notch rather than merely match it — see notchClearance().
         let notch = notchWidth(of: builtInScreen())
         let minimumWidth = notch > 0 ? notch + notchClearance() * 2 : 0
-        self.pillWidth = max(intrinsicWidth, minimumWidth)
+        let bodyWidth = max(intrinsicWidth, minimumWidth)
         self.data = NotificationData(title: title, subtitle: finalSubtitle, bundleID: bundleID, appIcon: appIcon)
         
         let notchDepth = builtInScreen().safeAreaInsets.top > 0 ? builtInScreen().safeAreaInsets.top : 24.0
         let dynamicPillHeight = notchDepth + (isCompact ? 24.0 : 38.0)
+        let shoulder = NotchShapeLayout.shoulder(forHeight: dynamicPillHeight)
+        self.pillWidth = bodyWidth + shoulder * 2
         
         super.init(
             contentRect: NSRect(x: 0, y: 0, width: self.pillWidth, height: dynamicPillHeight),
@@ -192,6 +195,7 @@ final class NotchNotificationWindow: NSPanel {
         dismissTimer = nil
         NotificationCenter.default.post(name: NSNotification.Name("NotchDismiss"), object: nil)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+            let callback = self?.onDismissCompleted
             self?.close()
             // Release the SwiftUI view with the window's contents. WindowManager
             // keeps this window in `notchWindow` after it closes, so without this
@@ -199,6 +203,7 @@ final class NotchNotificationWindow: NSPanel {
             // off screen: a Core Animation commit every frame for WindowServer to
             // composite, for as long as the app runs.
             self?.contentView = nil
+            callback?()
         }
     }
 }
@@ -273,7 +278,9 @@ struct NotchNotificationView: View {
     /// the pill, and it plus the two extra gaps cost the title 38pt at compact
     /// size that the left-aligned layout would have given it.
     private var centredTitleWidth: CGFloat {
-        pillWidth
+        let shoulder = NotchShapeLayout.shoulder(forHeight: pillHeight)
+        let bodyWidth = max(1, pillWidth - shoulder * 2)
+        return bodyWidth
             - edgeInset * 2
             - (iconInset + iconSide)    // the leading icon
             - rowGap * 4                // icon | Spacer | text | Spacer | balance
@@ -301,18 +308,19 @@ struct NotchNotificationView: View {
 
     var body: some View {
         ZStack(alignment: .bottom) {
-            // Main Hardware Notch Body & Border (Extended upwards into bezel with seamless bottom curvature)
+            let cornerRadius: CGFloat = isCompact ? 14 : 18
+            let silhouette = NotchHardwareSilhouetteShape(cornerRadius: cornerRadius)
+            let outline = NotchHardwareOutlineShape(cornerRadius: cornerRadius)
+
+            // Main Hardware Notch Body & Border (Hardware shoulders flare into top bezel)
             ZStack {
-                RoundedRectangle(cornerRadius: isCompact ? 14 : 18, style: .continuous)
+                silhouette
                     .fill(Color.black)
-                    .padding(.top, -100)
 
-                RoundedRectangle(cornerRadius: isCompact ? 14 : 18, style: .continuous)
+                outline
                     .stroke(Color.white.opacity(appeared ? 0.38 : 0.12), lineWidth: 1.0)
-                    .padding(.top, -100)
-                    .padding(.bottom, 0.5)
 
-                RoundedRectangle(cornerRadius: isCompact ? 14 : 18, style: .continuous)
+                outline
                     .stroke(
                         LinearGradient(
                             colors: [
@@ -325,8 +333,6 @@ struct NotchNotificationView: View {
                         ),
                         lineWidth: 1.0
                     )
-                    .padding(.top, -100)
-                    .padding(.bottom, 0.5)
             }
             .frame(width: pillWidth, height: pillHeight)
 
@@ -439,7 +445,7 @@ struct NotchNotificationView: View {
                     Spacer(minLength: 4)
                 }
             }
-            .padding(.horizontal, edgeInset)
+            .padding(.horizontal, edgeInset + NotchShapeLayout.shoulder(forHeight: pillHeight))
             .padding(.bottom, isCompact ? 4 : 8)
             .frame(height: isCompact ? 26 : 40)
             .opacity(appeared ? 1.0 : 0.0)
@@ -500,11 +506,13 @@ struct NotchNotificationView: View {
 final class NotchPositionHUDWindow: NSPanel {
     var onDone:   (() -> Void)?
     var onCancel: (() -> Void)?
+    var onDismissCompleted: (() -> Void)?
     private let appName:  String
     private let bundleID: String?
 
-    // Fixed pill size (wide enough for all content + both buttons)
-    private let pillW: CGFloat = 540
+    // Fixed body size (wide enough for all content + both buttons)
+    private let bodyW: CGFloat = 540
+    private var pillW: CGFloat = 540
     // pillH will be set in show() based on notch depth
     private var pillH: CGFloat = 70
     private var winH:  CGFloat = 90
@@ -537,6 +545,8 @@ final class NotchPositionHUDWindow: NSPanel {
         let notchDepth = screen.safeAreaInsets.top > 0 ? screen.safeAreaInsets.top : 24.0
         pillH = notchDepth + 52.0   // notch area + content row
         winH  = pillH + 20.0        // extra space for the slide-in animation
+        let shoulder = NotchShapeLayout.shoulder(forHeight: pillH)
+        pillW = bodyW + shoulder * 2
 
         // Centre horizontally, clamped to screen bounds
         let x = max(sf.minX, min(sf.midX - pillW / 2, sf.maxX - pillW))
@@ -568,7 +578,11 @@ final class NotchPositionHUDWindow: NSPanel {
 
     private func dismissHUD() {
         NotificationCenter.default.post(name: NSNotification.Name("NotchPositionHUDDismiss"), object: nil)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in self?.close() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+            let callback = self?.onDismissCompleted
+            self?.close()
+            callback?()
+        }
     }
 }
 
@@ -588,7 +602,6 @@ struct NotchPositionHUDView: View {
     @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
     @State private var appeared    = false
     @State private var iconDrop    = false
-    @State private var hoverDone   = false
     @State private var hoverCancel = false
 
     private var accentColor: Color { themeColor.color ?? Color(red: 0.18, green: 0.85, blue: 0.5) }
@@ -599,18 +612,18 @@ struct NotchPositionHUDView: View {
 
     var body: some View {
         ZStack(alignment: .bottom) {
-            // ---- Notch-style pill background (Seamless top-anchored geometry) ----
+            let silhouette = NotchHardwareSilhouetteShape(cornerRadius: 18)
+            let outline = NotchHardwareOutlineShape(cornerRadius: 18)
+
+            // ---- Notch-style pill background (Hardware shoulders flare into top bezel) ----
             ZStack {
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                silhouette
                     .fill(Color.black)
-                    .padding(.top, -100)
 
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                outline
                     .stroke(Color.white.opacity(appeared ? 0.38 : 0.12), lineWidth: 1.0)
-                    .padding(.top, -100)
-                    .padding(.bottom, 0.5)
 
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                outline
                     .stroke(
                         LinearGradient(
                             colors: [
@@ -623,8 +636,6 @@ struct NotchPositionHUDView: View {
                         ),
                         lineWidth: 1.0
                     )
-                    .padding(.top, -100)
-                    .padding(.bottom, 0.5)
             }
             .frame(width: pillWidth, height: pillHeight)
 
@@ -697,22 +708,17 @@ struct NotchPositionHUDView: View {
                         .padding(.vertical, 5)
                         .background(Color(red: 0.2, green: 0.9, blue: 0.5))
                         .clipShape(Capsule())
-                        .shadow(color: Color(red: 0.2, green: 0.9, blue: 0.5).opacity(0.4), radius: 4)
                     }
-                    .buttonStyle(.plain)
-                    .onHover { h in
-                        if shouldReduceMotion {
-                            hoverDone = h
-                        } else {
-                            withAnimation(.easeInOut(duration: 0.12)) { hoverDone = h }
-                        }
-                    }
+                    .buttonStyle(ColoredActionButtonStyle(
+                        tint: Color(red: 0.2, green: 0.9, blue: 0.5),
+                        shape: AnyShape(Capsule())
+                    ))
                 }
                 .fixedSize()
                 .layoutPriority(1)
                 .padding(.trailing, 14)
             }
-            .padding(.horizontal, 4)
+            .padding(.horizontal, 4 + NotchShapeLayout.shoulder(forHeight: pillHeight))
             .padding(.bottom, 8)
             .frame(height: 44)
             .opacity(appeared ? 1.0 : 0.0)

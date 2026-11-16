@@ -8,6 +8,7 @@ extension EventType {
         case .manualSave: return "arrow.down.doc.fill"
         case .restore: return "arrow.uturn.backward.circle.fill"
         case .system: return "cpu"
+        case .debug: return "ladybug"
         }
     }
 
@@ -18,6 +19,7 @@ extension EventType {
             case .manualSave: return Color(red: 0.22, green: 0.46, blue: 0.88) // deep cosmic blue
             case .restore: return Color(white: 0.98) // starlight white
             case .system: return Color(red: 0.32, green: 0.58, blue: 0.98) // luminous celestial blue
+            case .debug: return Color(red: 0.75, green: 0.55, blue: 0.95) // soft violet
             }
         }
         switch self {
@@ -25,6 +27,7 @@ extension EventType {
         case .manualSave: return .blue
         case .restore: return .green
         case .system: return theme == .black ? Color(white: 0.75) : .purple
+        case .debug: return Color(red: 0.7, green: 0.4, blue: 1.0)
         }
     }
 
@@ -40,6 +43,11 @@ struct ActivityView: View {
     @AppStorage("themeColor") private var themeColor: ThemeColor = .default
     @AppStorage("appLanguage") private var appLanguage: AppLanguage = .auto
 
+    /// Only non-debug events are shown in the normal activity log.
+    private var visibleEvents: [TrackingEvent] {
+        manager.recentEvents.filter { $0.type != .debug }
+    }
+
     var body: some View {
         ScrollViewReader { proxy in
             VStack(alignment: .leading, spacing: 0) {
@@ -48,6 +56,10 @@ struct ActivityView: View {
                     Text("ACTIVITY LOG".localized(appLanguage))
                         .font(.system(size: 11, weight: .bold))
                         .foregroundStyle(.secondary)
+                        // Triple-click opens the dev debug panel (hidden gesture, dev-only)
+                        .onTapGesture(count: 3) {
+                            DebugLogWindow.shared.toggle()
+                        }
 
                     Spacer()
 
@@ -55,7 +67,7 @@ struct ActivityView: View {
                         Button(action: {
                             let pasteboard = NSPasteboard.general
                             pasteboard.clearContents()
-                            let text = manager.recentEvents.map { event in
+                            let text = visibleEvents.map { event in
                                 var str = "[\(event.timeString)] \(event.type.rawValue.uppercased()): \(event.message)"
                                 if let details = event.details {
                                     str += "\n" + details.map { "  • \($0)" }.joined(separator: "\n")
@@ -73,7 +85,6 @@ struct ActivityView: View {
 
                         Button(action: { manager.clearEvents() }) {
                             Image(systemName: "trash")
-                                .mainWindowSymbolAnimation(.wiggleByLayer, capturesClicks: false)
                         }
                         .buttonStyle(.plain)
                         .mainWindowSymbolHoverRegion()
@@ -88,7 +99,7 @@ struct ActivityView: View {
                 // Activity List
                 ScrollView {
                     VStack(alignment: .leading, spacing: 6) {
-                        if manager.recentEvents.isEmpty {
+                        if visibleEvents.isEmpty {
                             VStack(spacing: 8) {
                                 Image(systemName: "circle.dotted")
                                     .mainWindowSymbolAnimation(.breathePlain)
@@ -102,7 +113,7 @@ struct ActivityView: View {
                             .padding(.vertical, 40)
                             .mainWindowSymbolHoverRegion()
                         } else {
-                            ForEach(manager.recentEvents.reversed()) { event in
+                            ForEach(visibleEvents.reversed()) { event in
                                 eventRow(event)
                                     .id(event.id)
                             }
@@ -112,8 +123,8 @@ struct ActivityView: View {
                     .padding(.bottom, 12)
                 }
             }
-            .onChange(of: manager.recentEvents.first?.id) { _, _ in
-                if let newest = manager.recentEvents.first {
+            .onChange(of: visibleEvents.first?.id) { _, _ in
+                if let newest = visibleEvents.first {
                     withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
                         proxy.scrollTo(newest.id, anchor: .bottom)
                     }

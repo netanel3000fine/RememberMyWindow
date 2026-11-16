@@ -41,6 +41,7 @@ swiftc -parse-as-library \
     WindowLayout/ActivityView.swift \
     WindowLayout/SettingsView.swift \
     WindowLayout/WindowPreviewComponents.swift \
+    WindowLayout/NotchShapes.swift \
     WindowLayout/NotchNotification.swift \
     WindowLayout/NotchWelcomePillView.swift \
     WindowLayout/DesktopToggleManager.swift \
@@ -52,6 +53,7 @@ swiftc -parse-as-library \
     WindowLayout/CommandOverlayManager.swift \
     WindowLayout/WebAppDetector.swift \
     WindowLayout/MenuBarIconManager.swift \
+    WindowLayout/VorssaintNotchCoordinator.swift \
     -o "${MACOS_DIR}/${APP_NAME}"
 
 APP_VERSION=$(grep -E '^## \[[vV]?[0-9]+(\.[0-9]+)*\]' CHANGELOG.md | head -n 1 | sed -E 's/.*\[[vV]?([^]]+)\].*/\1/' || echo "13.1")
@@ -104,6 +106,8 @@ EOF
 echo "  - Copying icon..."
 [ -f "WindowLayout/AppIcon.icns" ] && cp "WindowLayout/AppIcon.icns" "${RESOURCES_DIR}/AppIcon.icns"
 [ -f "WindowLayout/AppIcon.png"  ] && cp "WindowLayout/AppIcon.png"  "${RESOURCES_DIR}/AppIcon.png"
+[ -f "WindowLayout/VorssaintAppIcon.png" ] && cp "WindowLayout/VorssaintAppIcon.png" "${RESOURCES_DIR}/VorssaintAppIcon.png"
+[ -f "WindowLayout/MenuDropdownPreview.png" ] && cp "WindowLayout/MenuDropdownPreview.png" "${RESOURCES_DIR}/MenuDropdownPreview.png"
 
 echo "  - Copying localizations..."
 [ -d "WindowLayout/he.lproj" ] && cp -R "WindowLayout/he.lproj" "${RESOURCES_DIR}/"

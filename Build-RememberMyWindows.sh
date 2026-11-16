@@ -53,8 +53,10 @@ swiftc -parse-as-library \
     WindowLayout/AutoLayoutHeroCard.swift \
     WindowLayout/LayoutsView.swift \
     WindowLayout/ActivityView.swift \
+    WindowLayout/DebugLogWindow.swift \
     WindowLayout/SettingsView.swift \
     WindowLayout/WindowPreviewComponents.swift \
+    WindowLayout/NotchShapes.swift \
     WindowLayout/NotchNotification.swift \
     WindowLayout/NotchWelcomePillView.swift \
     WindowLayout/DesktopToggleManager.swift \
@@ -66,6 +68,7 @@ swiftc -parse-as-library \
     WindowLayout/CommandOverlayManager.swift \
     WindowLayout/WebAppDetector.swift \
     WindowLayout/MenuBarIconManager.swift \
+    WindowLayout/VorssaintNotchCoordinator.swift \
     -o "${MACOS_DIR}/${APP_NAME}"
 echo "  - Swift compilation finished."
 
@@ -128,10 +131,16 @@ cp "WindowLayout/AppIcon.icns" "${RESOURCES_DIR}/AppIcon.icns"
 if [ -f "WindowLayout/AppIcon.png" ]; then
     cp "WindowLayout/AppIcon.png" "${RESOURCES_DIR}/AppIcon.png"
 fi
+if [ -f "WindowLayout/VorssaintAppIcon.png" ]; then
+    cp "WindowLayout/VorssaintAppIcon.png" "${RESOURCES_DIR}/VorssaintAppIcon.png"
+fi
 
 echo "Copying onboarding capture..."
 if [ -f "WindowLayout/OnboardingMainWindow.png" ]; then
     cp "WindowLayout/OnboardingMainWindow.png" "${RESOURCES_DIR}/OnboardingMainWindow.png"
+fi
+if [ -f "WindowLayout/MenuDropdownPreview.png" ]; then
+    cp "WindowLayout/MenuDropdownPreview.png" "${RESOURCES_DIR}/MenuDropdownPreview.png"
 fi
 
 echo "Copying bundled wallpapers..."

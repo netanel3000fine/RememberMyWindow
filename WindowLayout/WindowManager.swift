@@ -121,10 +121,9 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
     private var coordinatedShrinkDetector = CoordinatedShrinkDetector()
     private var coordinatedShrinkDetectionNeedsRebase = true
 
-    /// Gap between geometry samples. Short enough to be invisible against the
-    /// coalescing interval, long enough that a drag cannot produce two
-    /// identical samples by chance.
-    private static let settleSampleInterval: UInt64 = 150_000_000
+    /// Gap between geometry samples. Long enough that a drag or macOS window
+    /// animation (e.g. Exposé, Stage Manager, Space return) completely finishes settling.
+    private static let settleSampleInterval: UInt64 = 400_000_000
 
     /// How long to keep waiting for the desk to stop moving.
     ///
@@ -196,6 +195,8 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
     private var lastLocationTimestamp: Date? = nil
     // MARK: - Screen Lock Tracking
     private var _isScreenLockedState: Bool = false
+    private var isHandlingScreenUnlock: Bool = false
+    private var screenUnlockCooldownTask: Task<Void, Never>? = nil
 
     /// Returns true if the macOS user session or screen is currently locked.
     var isScreenLocked: Bool {
@@ -311,6 +312,14 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
     private var lastFullRestoreTime: Date = .distantPast
     private var lastFullRestoreBundleIDs: Set<String> = []
 
+    /// Bundle IDs of every app that was already running when RememberMyWindows launched,
+    /// or when a display configuration was connected.
+    /// Used by the capture classifier to suppress false green [+] badges for apps that
+    /// were never launched by the user during this session.
+    var startupBundleIDs: Set<String> = {
+        Set(NSWorkspace.shared.runningApplications.compactMap(\.bundleIdentifier))
+    }()
+
     override private init() {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         let dir = appSupport.appendingPathComponent("RememberMyWindows", isDirectory: true)
@@ -318,14 +327,35 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
         saveURL = dir.appendingPathComponent("layouts.json")
         super.init()
 
-        autoSaveStore = AutoSaveStore(directory: dir) { [weak self] message in
+        autoSaveStore = AutoSaveStore(directory: dir) { [weak self] message, isDebug in
             // A refusal means auto-save is deliberately not recording, which the
             // user has no other way to discover. Routine writes stay verbose;
             // anything that declines to save is reportable at the default level.
             let level: LogLevel = message.contains("rejected") || message.contains("refusing")
                 ? .moderate : .verbose
-            self?.log(message, level: level, type: .autoSave)
+            self?.log(message, level: level, type: isDebug ? .debug : .autoSave)
         }
+
+        // Re-capture the settled window positions right before committing a blue (moved) row so
+        // that the thumbnail always reflects where windows ended up, not where they were at first
+        // detection. By commit time the 3-second settle has elapsed and the AX tree is stable.
+        autoSaveStore?.onWillCommitMovement = { [weak self] screenKey in
+            guard let self else { return nil }
+            let fp = self.currentFingerprint
+            guard fp.key == screenKey else { return nil }
+            let fresh = self.captureAllWindows(for: fp, silent: true)
+            guard !fresh.isEmpty else { return nil }
+            return self.holdingHeldWindows(fresh, screenKey: screenKey)
+        }
+
+        // Forward autoSaveStore mutations to WindowManager so SwiftUI views (capture lists, hero cards,
+        // and debug viewers) re-render immediately when captures are recorded or display events occur.
+        autoSaveStore?.objectWillChange
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.objectWillChange.send()
+            }
+            .store(in: &cancellables)
 
         // Forced flush points. The coalescing interval is deliberately long, so
         // without these the last state before a shutdown is the one lost.
@@ -1576,6 +1606,15 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
                 self.isFocusedOnNonDesktopSpace = false
                 self.isHandlingSpaceChange = false
                 self.pendingAppLaunchesOnOtherSpaces.removeAll()
+
+                // Flush any cache wipe that was deferred while we were on a non-desktop Space.
+                if self.pendingCacheWipe {
+                    self.log("♻️ Flushing deferred AX cache wipe now that desktop Space is active", level: .moderate, type: .system)
+                    self.cachedAXWindowsByPID.removeAll()
+                    self.lastCGWindowsByPID.removeAll()
+                    self.pendingCacheWipe = false
+                }
+
                 self.flushPendingSaves()
             } else {
                 self.isHandlingSpaceChange = false
@@ -2128,19 +2167,12 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
     /// front of the user now.
     func snapshot(from entry: AutoSaveEntry) -> LayoutSnapshot? {
         guard entry.screenKey == currentFingerprint.key else { return nil }
-        var seenBundleIDs = Set<String>()
-        let appRecords = entry.records.compactMap { record -> WindowRecord? in
-            let bundleID = record.windowID.appBundleID
-            guard seenBundleIDs.insert(bundleID).inserted else { return nil }
-            return autoSaveStore?.appWindowDefault(forBundleID: bundleID,
-                                                   screenKey: entry.screenKey) ?? record
-        }
         return LayoutSnapshot(
             id: entry.id,
             name: entry.readableScreenKey ?? currentFingerprint.readableName,
             screenKey: entry.screenKey,
             readableScreenKey: entry.readableScreenKey,
-            records: appRecords,
+            records: entry.records,
             createdAt: entry.capturedAt,
             updatedAt: entry.capturedAt,
             location: nil,
@@ -2423,7 +2455,7 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
         // windows are still settling, and for the length of any restore, so the
         // arrangement a restore is about to replace does not become the
         // arrangement it restores to.
-        if store.autoSaveEnabled && !isHandlingDisplayChange && !isHandlingSpaceChange && !isFocusedOnNonDesktopSpace && !isSettlingContestedWindows
+        if store.autoSaveEnabled && !isHandlingDisplayChange && !isHandlingSpaceChange && !isHandlingScreenUnlock && !isScreenLocked && !isFocusedOnNonDesktopSpace && WindowSpaces.isCurrentSpaceDesktop() && !isSettlingContestedWindows
             && !isSettlingRestoredLayout
             && !isRestoreInFlight {
             if isOverviewActive {
@@ -2516,7 +2548,9 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
             guard let old = old,
                   old.screenKey == record.screenKey,
                   old.screenName == record.screenName,
-                  old.zIndex == record.zIndex,
+                  // zIndex (focus/stacking order) is intentionally omitted: space transitions
+                  // reshuffle window Z-order without any user layout change, consistent with
+                  // AutoSaveStore.recordsMatchGeometry which also ignores zIndex.
                   old.isFullScreenMode == record.isFullScreenMode,
                   old.isNativeFullScreen == record.isNativeFullScreen,
                   framesMatch(old.globalFrame, record.globalFrame) else {
@@ -2538,19 +2572,33 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
         recentEvents.removeAll()
     }
 
+    /// Removes only `.debug`-type events, preserving restore/save/system history.
+    func clearDebugEvents() {
+        recentEvents.removeAll { $0.type == .debug }
+    }
+
     // MARK: - Lock State Handlers
 
     @objc private func screenLockedReceived() {
         _isScreenLockedState = true
+        isHandlingScreenUnlock = false
+        screenUnlockCooldownTask?.cancel()
+        screenUnlockCooldownTask = nil
         log("🔒 Screen is locked", level: .verbose, type: .system)
     }
 
     @objc private func sessionDidResignActive() {
         _isScreenLockedState = true
+        isHandlingScreenUnlock = false
+        screenUnlockCooldownTask?.cancel()
+        screenUnlockCooldownTask = nil
     }
 
     @objc private func screensDidSleep() {
         _isScreenLockedState = true
+        isHandlingScreenUnlock = false
+        screenUnlockCooldownTask?.cancel()
+        screenUnlockCooldownTask = nil
     }
 
     @objc private func screensDidWake() {
@@ -2604,6 +2652,18 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
     }
 
     private func handleScreenUnlockedIfNeeded() {
+        isHandlingScreenUnlock = true
+        screenUnlockCooldownTask?.cancel()
+        screenUnlockCooldownTask = Task { @MainActor [weak self] in
+            // Allow 2.0s for displays to wake, WindowServer connections to settle, and wake animations to finish.
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            guard !Task.isCancelled, let self else { return }
+            self.isHandlingScreenUnlock = false
+            if self.store.autoSaveEnabled && !self.isScreenLocked && WindowSpaces.isCurrentSpaceDesktop() {
+                self.scheduleAXEventFlush(delay: 100_000_000, urgent: true)
+            }
+        }
+
         if displayRestoreHeldForUnlock {
             displayRestoreHeldForUnlock = false
             // Nothing was restored behind the lock, so there is nothing for the
@@ -2796,6 +2856,9 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
     private var isHandlingDisplayChange = false
     private var isHandlingSpaceChange = false
     private var isFocusedOnNonDesktopSpace = false
+    /// Set to true when a display-removal wipe was skipped because the user was
+    /// on a non-desktop Space. Flushed the moment we return to the desktop.
+    private var pendingCacheWipe = false
     private var pendingAppLaunchesOnOtherSpaces: Set<String> = []
     private var spaceChangeCooldownTask: Task<Void, Never>?
     private var isSettlingRestoredLayout = false
@@ -2993,6 +3056,10 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
 
         log("🖥️ Display config changed → \(newFP.readableName) (\(newFP.displays.count) screen(s))", level: .moderate, type: .system)
 
+        // Reset the baseline of running applications for this screen session so
+        // future launches on this screen are recognized.
+        startupBundleIDs = Set(NSWorkspace.shared.runningApplications.compactMap(\.bundleIdentifier))
+
         // Write whatever is still coalescing before anything else touches the
         // desk. `pending` carries the OUTGOING configuration's key, so this
         // preserves the arrangement under the configuration it was made in.
@@ -3015,23 +3082,33 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
         let hasAutoCapture = store.autoSaveEnabled
             && (autoSaveStore?.entry(forScreenKey: newKey) != nil)
 
-        // Detect added / removed displays
-        let oldScreens = Set(oldFP.displays.map { $0.screenNumber })
-        let newScreens = Set(newFP.displays.map { $0.screenNumber })
-        let addedScreens   = newScreens.subtracting(oldScreens)
-        let removedScreens = oldScreens.subtracting(newScreens)
+        // Detect added / removed displays using stable display UUIDs as well as display count
+        let oldDisplayIDs = Set(oldFP.displays.map { $0.uuid ?? "\($0.screenNumber)" })
+        let newDisplayIDs = Set(newFP.displays.map { $0.uuid ?? "\($0.screenNumber)" })
+        let addedDisplayIDs   = newDisplayIDs.subtracting(oldDisplayIDs)
+        let removedDisplayIDs = oldDisplayIDs.subtracting(newDisplayIDs)
 
-        if !removedScreens.isEmpty {
-            // Display removal invalidates all cached AX frames — positions shift unpredictably
-            log("⚠️ Display removed — clearing AX cache to prevent ghost windows", level: .moderate, type: .system)
-            cachedAXWindowsByPID.removeAll()
-            lastCGWindowsByPID.removeAll()
+        if !removedDisplayIDs.isEmpty || newFP.displays.count < oldFP.displays.count {
+            // Display removal invalidates all cached AX frames — positions shift unpredictably.
+            // Guard: if the user is currently on a non-desktop Space (e.g. full-screen app),
+            // AX reports virtual/garbage coordinates for all windows. Wiping and immediately
+            // refilling the cache from that state would poison it with wrong positions.
+            // Defer the wipe until we return to the desktop Space instead.
+            if isFocusedOnNonDesktopSpace {
+                log("⚠️ Display removed while on non-desktop Space — deferring AX cache wipe until desktop returns", level: .moderate, type: .system)
+                pendingCacheWipe = true
+            } else {
+                log("⚠️ Display removed — clearing AX cache to prevent ghost windows", level: .moderate, type: .system)
+                cachedAXWindowsByPID.removeAll()
+                lastCGWindowsByPID.removeAll()
+            }
         }
 
-
-        let connectedScreenNames = addedScreens.compactMap { num in
-            NSScreen.screens.first { ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? Int) == num }?.localizedName
-        }
+        let connectedScreenNames: [String] = {
+            let fromAddedIDs = newFP.displays.filter { addedDisplayIDs.contains($0.uuid ?? "\($0.screenNumber)") }.compactMap { $0.name }
+            if !fromAddedIDs.isEmpty { return fromAddedIDs }
+            return NSScreen.screens.compactMap { $0.localizedName }
+        }()
         
         for name in connectedScreenNames {
             if name != "Unknown Screen" && !name.isEmpty {
@@ -3040,13 +3117,25 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
         }
         
         // Even if we don't know the name yet, remember that a screen was added
-        let hasAnyAddedScreens = !addedScreens.isEmpty
+        let hasAnyAddedScreens = !addedDisplayIDs.isEmpty || newFP.displays.count > oldFP.displays.count
         if !hasAnyAddedScreens {
             pendingConnectedNames.removeAll()
         }
 
-        // This is scoped to an added display. Other display changes keep their
-        // existing notification path and never become Welcome subtitles.
+        // Detect if we reverted to only the built-in laptop screen
+        let isRevertingToBuiltInOnly = (!removedDisplayIDs.isEmpty || newFP.displays.count < oldFP.displays.count) && newFP.displays.count == 1
+        let disconnectedScreenNames = oldFP.displays.filter { removedDisplayIDs.contains($0.uuid ?? "\($0.screenNumber)") }.compactMap { $0.name }
+            .filter { !$0.isEmpty && $0 != "Unknown Screen" }
+
+        let displayDisconnectionTitle: String? = {
+            guard isRevertingToBuiltInOnly else { return nil }
+            let names = disconnectedScreenNames.sorted()
+            let unpluggedTitle = lz("Unplugged")
+            guard !names.isEmpty else { return unpluggedTitle }
+            return "\(names.joined(separator: " & ")) \(unpluggedTitle)"
+        }()
+
+        // This is scoped to an added display or a disconnection reverting to built-in.
         pendingDisplayConnectionTitle = nil
         let displayConnectionTitle: String? = {
             guard hasAnyAddedScreens else { return nil }
@@ -3054,7 +3143,8 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
             guard !names.isEmpty else { return "Display Connected" }
             return "\(names.joined(separator: " & ")) Connected"
         }()
-        let displayChangeTitle = displayConnectionTitle ?? "Display Configuration Changed"
+        let displayEventTitle = displayConnectionTitle ?? displayDisconnectionTitle
+        let displayChangeTitle = displayEventTitle ?? "Display Configuration Changed"
 
         // Nothing below starts a restore unless the branch just after this does,
         // so release the hold on every other path or auto-save stays switched
@@ -3093,19 +3183,19 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
                 if self.isScreenLocked {
                     self.log("🔒 Screen is locked — holding the restore until unlock; window positions set behind the lock do not stick", level: .necessary, type: .restore)
                     self.displayRestoreHeldForUnlock = true
-                    self.pendingDisplayConnectionTitle = displayConnectionTitle
+                    self.pendingDisplayConnectionTitle = displayEventTitle
                     self.pendingConnectedNames.removeAll()
                     return
                 }
 
-                // For added displays, restore selection decides whether this
-                // is the ordinary connection alert or the first Welcome
-                // subtitle. Configuration changes keep their existing alert.
-                if let displayConnectionTitle {
+                // For added or disconnected displays, restore selection decides whether this
+                // is the connection/disconnection alert or the first Welcome
+                // subtitle.
+                if let displayEventTitle {
                     self.restoreNow(
                         automatic: true,
                         displayConnectionRequest: DisplayConnectionRestoreRequest(
-                            title: displayConnectionTitle,
+                            title: displayEventTitle,
                             sendsSystemNotification: true
                         )
                     )
@@ -3122,6 +3212,48 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
                 
                 // Clear the pending names
                 self.pendingConnectedNames.removeAll()
+
+                // Wait for the restore to place and settle windows, then record the clean restored layout
+                // as the display event row. This sets the neat restored arrangement as its baseline so any
+                // subsequent user window move compares cleanly against it.
+                try? await Task.sleep(nanoseconds: 1_500_000_000)
+                guard !Task.isCancelled else { return }
+
+                let settledWindows = self.captureAllWindows(for: newFP, silent: true)
+                let stableWindows = self.holdingHeldWindows(settledWindows, screenKey: newFP.key)
+                self.autoSaveStore?.record(
+                    records: stableWindows,
+                    screenKey: newFP.key,
+                    readableScreenKey: newFP.readableName,
+                    force: true,
+                    isDisplayConnection: hasAnyAddedScreens,
+                    isDisplayDisconnection: isRevertingToBuiltInOnly
+                )
+            }
+        } else if hasAnyAddedScreens || isRevertingToBuiltInOnly {
+            // When auto-restore is not enabled or no saved layout exists, hold off auto-save
+            // for the connection settle period, then record the settled layout as a display event row.
+            willRestore = true
+            screenChangeTask?.cancel()
+            let generation = displayChangeGeneration
+            screenChangeTask = Task { @MainActor [weak self] in
+                defer {
+                    if let self, self.displayChangeGeneration == generation {
+                        self.isHandlingDisplayChange = false
+                    }
+                }
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                guard !Task.isCancelled, let self = self else { return }
+                let settledWindows = self.captureAllWindows(for: newFP, silent: true)
+                let stableWindows = self.holdingHeldWindows(settledWindows, screenKey: newFP.key)
+                self.autoSaveStore?.record(
+                    records: stableWindows,
+                    screenKey: newFP.key,
+                    readableScreenKey: newFP.readableName,
+                    force: true,
+                    isDisplayConnection: hasAnyAddedScreens,
+                    isDisplayDisconnection: isRevertingToBuiltInOnly
+                )
             }
         }
     }
@@ -3189,19 +3321,33 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
         subsequentSubtitles: [String] = [],
         playSound: Bool = true
     ) {
-        self.notchWindow?.dismiss()
-        self.welcomeNotchWindow?.dismiss()
-        let welcomeWin = NotchWelcomeWindow(
-            subtitle: subtitle,
-            subsequentSubtitles: subsequentSubtitles
-        )
-        welcomeWin.isScreenLocked = self.isScreenLocked
-        self.welcomeNotchWindow = welcomeWin
-        welcomeWin.show(subtitle: subtitle)
+        let present = { [weak self] in
+            guard let self = self else { return }
+            self.notchWindow?.dismiss()
+            self.welcomeNotchWindow?.dismiss()
+            let welcomeWin = NotchWelcomeWindow(
+                subtitle: subtitle,
+                subsequentSubtitles: subsequentSubtitles
+            )
+            welcomeWin.isScreenLocked = self.isScreenLocked
+            if self.store.coexistWithVorssaintNotch {
+                welcomeWin.onDismissCompleted = {
+                    VorssaintNotchCoordinator.shared.didDismissPill()
+                }
+            }
+            self.welcomeNotchWindow = welcomeWin
+            welcomeWin.show(subtitle: subtitle)
 
-        let masterSoundEnabled = UserDefaults.standard.object(forKey: "masterSoundEnabled") as? Bool ?? true
-        if playSound && self.store.welcomeNotchPillSoundEnabled && masterSoundEnabled {
-            SystemSound.playSound(named: self.store.welcomeNotchPillSoundName, volume: self.effectiveNotchSoundVolume)
+            let masterSoundEnabled = UserDefaults.standard.object(forKey: "masterSoundEnabled") as? Bool ?? true
+            if playSound && self.store.welcomeNotchPillSoundEnabled && masterSoundEnabled {
+                SystemSound.playSound(named: self.store.welcomeNotchPillSoundName, volume: self.effectiveNotchSoundVolume)
+            }
+        }
+
+        if self.store.coexistWithVorssaintNotch {
+            VorssaintNotchCoordinator.shared.prepareForPill(completion: present)
+        } else {
+            present()
         }
     }
 
@@ -3331,10 +3477,23 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
             if channel == .notch {
                 // Force notch only — bypass showSystemNotification check
                 guard !self.isScreenLocked else { return }
-                self.notchWindow?.dismiss()
-                let window = NotchNotificationWindow(title: title, subtitle: subtitle, isCompact: isCompact, bundleID: bundleID, appIcon: nil)
-                self.notchWindow = window
-                window.show()
+                let presentPreview = { [weak self] in
+                    guard let self = self else { return }
+                    self.notchWindow?.dismiss()
+                    let window = NotchNotificationWindow(title: title, subtitle: subtitle, isCompact: isCompact, bundleID: bundleID, appIcon: nil)
+                    if self.store.coexistWithVorssaintNotch {
+                        window.onDismissCompleted = {
+                            VorssaintNotchCoordinator.shared.didDismissPill()
+                        }
+                    }
+                    self.notchWindow = window
+                    window.show()
+                }
+                if self.store.coexistWithVorssaintNotch {
+                    VorssaintNotchCoordinator.shared.prepareForPill(completion: presentPreview)
+                } else {
+                    presentPreview()
+                }
                 // Also play the correct per-event sound for the notch channel
                 let soundEnabled: Bool
                 let soundName: String
@@ -3490,11 +3649,24 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
                         if let window = self.notchWindow, window.isVisible, window.isCompact == isCompact {
                             window.update(title: title, subtitle: subtitle, bundleID: bundleID, appIcon: appIcon)
                         } else {
-                            self.notchWindow?.dismiss()
-                            self.welcomeNotchWindow?.dismiss()
-                            let window = NotchNotificationWindow(title: title, subtitle: subtitle, isCompact: isCompact, bundleID: bundleID, appIcon: appIcon)
-                            self.notchWindow = window
-                            window.show()
+                            let presentNotification = { [weak self] in
+                                guard let self = self else { return }
+                                self.notchWindow?.dismiss()
+                                self.welcomeNotchWindow?.dismiss()
+                                let window = NotchNotificationWindow(title: title, subtitle: subtitle, isCompact: isCompact, bundleID: bundleID, appIcon: appIcon)
+                                if self.store.coexistWithVorssaintNotch {
+                                    window.onDismissCompleted = {
+                                        VorssaintNotchCoordinator.shared.didDismissPill()
+                                    }
+                                }
+                                self.notchWindow = window
+                                window.show()
+                            }
+                            if self.store.coexistWithVorssaintNotch {
+                                VorssaintNotchCoordinator.shared.prepareForPill(completion: presentNotification)
+                            } else {
+                                presentNotification()
+                            }
                         }
 
                         if notchSoundEnabled && !silent {
@@ -4260,14 +4432,29 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
             let title    = raw.entry[kCGWindowName as String] as? String ?? ""
 
             // AppKit coords: (bottom-left origin)
-            let appKitFrame = CGRect(x: x, y: primaryScreenHeight - y - h, width: w, height: h)
+            var appKitFrame = CGRect(x: x, y: primaryScreenHeight - y - h, width: w, height: h)
 
             // Find which screen this window primarily lives on
             let screen = screens.max(by: { s1, s2 in
                 let area1 = s1.frame.intersection(appKitFrame).area
                 let area2 = s2.frame.intersection(appKitFrame).area
                 return area1 < area2
-            })
+            }) ?? NSScreen.main
+
+            if let s = screen {
+                let intersectionArea = s.frame.intersection(appKitFrame).area
+                // If a window is sliding across spaces during a transition (e.g. Finder or native full-screen animation)
+                // or reported at disconnected virtual space coordinates, CGWindowList returns intermediate coordinates
+                // outside the physical screen bounds. Clamp coordinates to the screen to prevent saving corrupted negative slide offsets.
+                if intersectionArea == 0 || appKitFrame.origin.x < s.frame.minX - 20 {
+                    appKitFrame.origin.x = max(s.frame.minX, appKitFrame.origin.x)
+                } else if appKitFrame.origin.x > s.frame.maxX - 20 && appKitFrame.width > 100 {
+                    appKitFrame.origin.x = min(s.frame.maxX - appKitFrame.width, appKitFrame.origin.x)
+                }
+                if intersectionArea == 0 || appKitFrame.origin.y < s.frame.minY - 20 {
+                    appKitFrame.origin.y = max(s.frame.minY, appKitFrame.origin.y)
+                }
+            }
 
             let index = appWindowCounts[bundleID, default: 0]
             appWindowCounts[bundleID] = index + 1
@@ -6680,9 +6867,15 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
         // The clamp is here for a different case: a layout captured on a display
         // that is now smaller, or gone. So it belongs behind a test for that. If
         // the display this window was captured on is still present with the same
-        // frame, the saved geometry was reachable then and is reachable now.
+        // frame, the saved geometry was reachable then and is reachable now, UNLESS
+        // it was captured far off-screen due to a Space-switching animation or unplug artifact.
         if let savedScreen = record.screenFrame, savedScreen == screen.frame {
-            return f
+            let isOffscreenArtifact = f.origin.x < screen.frame.minX - 50 ||
+                                      f.origin.y < screen.frame.minY - 50 ||
+                                      f.origin.x > screen.frame.maxX - 50
+            if !isOffscreenArtifact {
+                return f
+            }
         }
 
         let vf = screen.visibleFrame
@@ -6920,8 +7113,8 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
             return
         }
         let geometryChanged = geometryEvent && windowServerGeometryChangedSinceLastSample()
-        let shouldFlushUrgently = urgent || geometryChanged
-        if shouldFlushUrgently && isAXFlushScheduled {
+        let shouldFlushUrgently = urgent
+        if (shouldFlushUrgently || geometryChanged) && isAXFlushScheduled {
             axEventDebounceTask?.cancel()
             isAXFlushScheduled = false
         }
@@ -6929,8 +7122,13 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
         isAXFlushScheduled = true
 
         // Keep live tracking responsive after a drag. Repeated idle notifications back off.
+        // Geometry changes apply a 250ms trailing debounce so mid-drag frames are not sampled.
         let elapsed = lastAXCaptureDate.map { Date().timeIntervalSince($0) } ?? .infinity
-        let throttleDelay = shouldFlushUrgently ? 0 : UInt64(max(0, axIdleCaptureInterval - elapsed) * 1_000_000_000)
+        let throttleDelay: UInt64 = {
+            if shouldFlushUrgently { return 0 }
+            if geometryChanged { return 250_000_000 }
+            return UInt64(max(0, axIdleCaptureInterval - elapsed) * 1_000_000_000)
+        }()
         let effectiveDelay = max(delay, throttleDelay)
         axEventDebounceTask = Task { [weak self] in
             if effectiveDelay > 0 {
@@ -7214,7 +7412,8 @@ final class WindowManager: NSObject, ObservableObject, CLLocationManagerDelegate
         case .verbose:   msgImportance = 2
         }
 
-        if msgImportance > currentLevelImportance {
+        // Dev debug logs bypass the user-facing importance threshold so the dev debug viewer always receives them.
+        if type != .debug && msgImportance > currentLevelImportance {
             return
         }
 
@@ -7450,6 +7649,8 @@ enum EventType: String, Codable {
     case manualSave = "Save"
     case restore = "Restore"
     case system = "System"
+    /// Dev-only debug events. Filtered out of the normal Activity Log; only shown in the debug panel.
+    case debug = "Debug"
 }
 
 struct TrackingEvent: Identifiable {
@@ -7477,7 +7678,9 @@ struct TrackingEvent: Identifiable {
 ///
 /// Off by default, so nothing is written to disk on an ordinary run.
 enum DebugLogSink {
-    private static let enabled = UserDefaults.standard.bool(forKey: "debugLogToFile")
+    private static var enabled: Bool {
+        UserDefaults.standard.bool(forKey: "debugLogToFile")
+    }
     private static let queue = DispatchQueue(label: "com.netanel.remembermywindows.debuglog")
 
     /// Roll the file over past this size, keeping one previous generation, so the
@@ -7563,6 +7766,9 @@ enum DebugLogSink {
         for d in details ?? [] { line += "    - \(d)\n" }
         guard let data = line.data(using: .utf8) else { return }
         queue.async {
+            if handle == nil {
+                handle = openHandle()
+            }
             rotateIfNeeded()
             guard let h = handle else { return }
             try? h.write(contentsOf: data)

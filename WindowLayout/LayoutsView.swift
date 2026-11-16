@@ -271,20 +271,9 @@ struct SnapshotListView: View {
                 .frame(width: 24)
 
             VStack(alignment: .leading, spacing: 4) {
-                HStack {
-                    Text(snapshot.displayName)
-                        .font(.system(.headline, design: .rounded).weight(.medium))
-                        .lineLimit(1)
-                    if isLive {
-                        Text("Live".localized(appLanguage))
-                            .font(.system(size: 11, weight: .bold))
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(themeColor.color(seed: 3).opacity(0.15))
-                            .foregroundStyle(.primary)
-                            .clipShape(Capsule())
-                    }
-                }
+                Text(snapshot.displayName)
+                    .font(.system(.headline, design: .rounded).weight(.medium))
+                    .lineLimit(1)
 
                 if isLive {
                     Text(ScreenFingerprint.from(key: snapshot.screenKey).readableName)
@@ -305,7 +294,8 @@ struct SnapshotListView: View {
                 screenKey: snapshot.screenKey,
                 tint: rowTint,
                 isLive: isLive,
-                isHighlighted: isApplicable
+                isHighlighted: isApplicable,
+                badgeStatus: isApplicable ? .live : nil
             )
         }
     }
@@ -334,7 +324,15 @@ struct SnapshotDetailView: View {
 
     var body: some View {
         GeometryReader { outerGeo in
-            let isCompactLocation = outerGeo.size.width < 520
+            let locationLayout: LocationBlock.DisplayMode = {
+                if outerGeo.size.width < 400 {
+                    return .compact
+                }
+                if outerGeo.size.width < 520 {
+                    return .intermediate
+                }
+                return .expanded
+            }()
             VStack(alignment: .leading, spacing: 0) {
                 VStack(alignment: .leading, spacing: 16) {
                     HStack(alignment: .top, spacing: 16) {
@@ -349,7 +347,7 @@ struct SnapshotDetailView: View {
                                     .lineLimit(1)
                             }
                             
-                            HStack(spacing: isCompactLocation ? 16 : 24) {
+                            HStack(spacing: locationLayout == .expanded ? 24 : 16) {
                                 statPill(label: "Windows".localized(appLanguage), value: "\(snapshot.previewRecords.count)")
                                 statPill(label: "Created".localized(appLanguage), value: snapshot.createdAt.formatted(Date.FormatStyle(date: .abbreviated, time: .omitted, locale: currentLocale)))
                                 statPill(label: "Updated".localized(appLanguage), value: snapshot.updatedAt.formatted(.relative(presentation: .named).locale(currentLocale)))
@@ -363,7 +361,7 @@ struct SnapshotDetailView: View {
                                 snapshotID: key,
                                 location: location,
                                 isUpdated: snapshot.updatedAt.timeIntervalSince(snapshot.createdAt) > 1,
-                                isCompact: isCompactLocation
+                                layout: locationLayout
                             )
                         }
                     }
@@ -389,7 +387,7 @@ struct SnapshotDetailView: View {
                     let records = snapshot.records.deduplicatedByApp.filter { !$0.windowID.appBundleID.isEmpty }
                     if appListViewMode == .grid {
                         LazyVGrid(
-                            columns: [GridItem(.adaptive(minimum: 120, maximum: 160), spacing: 12)],
+                            columns: [GridItem(.adaptive(minimum: 140, maximum: 180), spacing: 12)],
                             spacing: 12
                         ) {
                             ForEach(records) { record in
@@ -760,15 +758,19 @@ struct WindowGridCard: View {
             ZStack {
                 if isFull {
                     FullScreenPreviewIcon(tint: rowTint)
-                        .frame(width: 52, height: 34)
+                        .frame(width: 68, height: 44)
                 } else {
+                    // WindowPreviewIcon now fills its proposed 68×44 frame,
+                    // matching the visual size of the full-screen thumbnail.
                     WindowPreviewIcon(record: record, tint: rowTint)
-                        .frame(width: 52, height: 34)
+                        .frame(width: 68, height: 44)
                 }
             }
-            .frame(width: 82, height: 52)
+            // ── Top-corner badges hanging just outside the thumbnail ───
+            // Negative offsets push badges beyond the thumbnail corners
+            // into the surrounding card padding, mirroring the full-screen
+            // card's badge placement.
             .overlay(alignment: .topLeading) {
-                // Command Trigger badge pinned to top-left corner
                 if isCommandTriggerActive && !showsHoverActions {
                     ZStack(alignment: .topTrailing) {
                         Image(systemName: "command")
@@ -782,13 +784,12 @@ struct WindowGridCard: View {
                             .frame(width: 5, height: 5)
                             .offset(x: 1, y: -1)
                     }
-                    .offset(x: 2, y: 2)
+                    .offset(x: -6, y: -6)
                     .help("Command Trigger active for this app".localized(appLanguage))
                     .transition(.opacity)
                 }
             }
             .overlay(alignment: .topTrailing) {
-                // Foreground badge pinned to thumbnail corner
                 if isForeground && !showsHoverActions {
                     Image(systemName: "square.3.layers.3d.top.filled")
                         .mainWindowSymbolAnimation(.breathePlain)
@@ -796,8 +797,27 @@ struct WindowGridCard: View {
                         .foregroundStyle(themeColor.color(seed: 5))
                         .padding(3)
                         .background(Circle().fill(.ultraThinMaterial))
-                        .offset(x: -2, y: 2)
+                        .offset(x: 6, y: -6)
                         .help("This app will be brought to the front upon restore".localized(appLanguage))
+                        .transition(.opacity)
+                }
+            }
+            // ── Expand to card area after badges are anchored ──────────
+            .frame(width: 100, height: 64)
+            .overlay(alignment: .bottomTrailing) {
+                // Keep the app recognizable without adding another row to the card.
+                if !showsHoverActions {
+                    AppIconView(bundleID: appID)
+                        .frame(width: 28, height: 28)
+                        .background(.ultraThinMaterial)
+                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .strokeBorder(Color.primary.opacity(0.16), lineWidth: 0.5)
+                        }
+                        .shadow(color: .black.opacity(0.22), radius: 2, x: 0, y: 1)
+                        .padding(4)
+                        .accessibilityHidden(true)
                         .transition(.opacity)
                 }
             }
@@ -829,41 +849,34 @@ struct WindowGridCard: View {
             .padding(.top, 10)
             .padding(.horizontal, 10)
 
-            // ── App icon + name ────────────────────────────────────────
-            VStack(spacing: 5) {
-                AppIconView(bundleID: record.windowID.appBundleID)
-                    .frame(width: 40, height: 40)
-                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                    .shadow(color: rowTint.opacity(0.2), radius: 4, x: 0, y: 2)
+            // ── App name + status ──────────────────────────────────────
+            VStack(spacing: 2) {
+                Text(record.windowID.appName ?? record.windowID.appBundleID)
+                    .font(.system(.caption, design: .rounded).weight(.semibold))
+                    .lineLimit(2)
+                    .multilineTextAlignment(.center)
+                    .minimumScaleFactor(0.8)
 
-                VStack(spacing: 2) {
-                    Text(record.windowID.appName ?? record.windowID.appBundleID)
-                        .font(.system(.caption, design: .rounded).weight(.semibold))
-                        .lineLimit(2)
-                        .multilineTextAlignment(.center)
-                        .minimumScaleFactor(0.8)
-
-                    if isFull {
-                        Text("Full Screen".localized(appLanguage))
-                            .font(.system(size: 8, weight: .bold))
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 2)
-                            .background(Color.green.opacity(0.18))
-                            .foregroundStyle(.primary)
-                            .clipShape(Capsule())
-                    } else if isCurrentApp {
-                        Text("Active".localized(appLanguage))
-                            .font(.system(size: 8, weight: .bold))
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 2)
-                            .background(Color.green.opacity(0.18))
-                            .foregroundStyle(.primary)
-                            .clipShape(Capsule())
-                    }
+                if isFull {
+                    Text("Full Screen".localized(appLanguage))
+                        .font(.system(size: 8, weight: .bold))
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 2)
+                        .background(Color.green.opacity(0.18))
+                        .foregroundStyle(.primary)
+                        .clipShape(Capsule())
+                } else if isCurrentApp {
+                    Text("Active".localized(appLanguage))
+                        .font(.system(size: 8, weight: .bold))
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 2)
+                        .background(Color.green.opacity(0.18))
+                        .foregroundStyle(.primary)
+                        .clipShape(Capsule())
                 }
             }
-            .padding(.top, 8)
-            .padding(.bottom, 12)
+            .padding(.top, 4)
+            .padding(.bottom, 8)
             .padding(.horizontal, 8)
         }
         .frame(maxWidth: .infinity)
@@ -882,12 +895,18 @@ struct WindowGridCard: View {
 }
 
 struct LocationBlock: View {
+    enum DisplayMode: Equatable {
+        case compact
+        case intermediate
+        case expanded
+    }
+
     @EnvironmentObject var manager: WindowManager
     @AppStorage("appLanguage") private var appLanguage: AppLanguage = .auto
     let snapshotID: String
     let location: LocationInfo
     let isUpdated: Bool
-    var isCompact: Bool = false
+    var layout: DisplayMode = .expanded
     
     @State private var isEditing = false
     @State private var editedAddress: String = ""
@@ -900,81 +919,104 @@ struct LocationBlock: View {
     private var displayAddress: String {
         location.address ?? "\(location.latitude), \(location.longitude)"
     }
-    
-    var body: some View {
-        HStack(spacing: isCompact ? 0 : 14) {
-            // Map Preview
-            ZStack {
-                Map(position: .constant(.region(MKCoordinateRegion(
-                    center: coordinate,
-                    span: MKCoordinateSpan(latitudeDelta: 0.01, longitudeDelta: 0.01)
-                )))) {
-                    Marker("", coordinate: coordinate)
+
+    private var mapSize: CGSize {
+        layout == .intermediate
+            ? CGSize(width: 80, height: 64)
+            : CGSize(width: 100, height: 80)
+    }
+
+    private var mapPreview: some View {
+        ZStack {
+            Map(position: .constant(.region(MKCoordinateRegion(
+                center: coordinate,
+                span: MKCoordinateSpan(latitudeDelta: 0.01, longitudeDelta: 0.01)
+            )))) {
+                Marker("", coordinate: coordinate)
+            }
+            .id(snapshotID) // Force recreation when switching layouts to ensure position updates
+            .allowsHitTesting(false)
+
+            Color.black.opacity(0.01)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    let url = URL(string: "http://maps.apple.com/?ll=\(location.latitude),\(location.longitude)&q=Saved%20Location")!
+                    NSWorkspace.shared.open(url)
                 }
-                .id(snapshotID) // Force recreation when switching layouts to ensure position updates
-                .allowsHitTesting(false)
-                
-                Color.black.opacity(0.01)
-                    .contentShape(Rectangle())
+        }
+        .frame(width: mapSize.width, height: mapSize.height)
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(Color.white.opacity(0.15), lineWidth: 1)
+        }
+        .shadow(color: .black.opacity(0.1), radius: 4, x: 0, y: 2)
+        .help(displayAddress)
+        .fixedSize()
+    }
+
+    private func locationDetails(width: CGFloat, showsRenameHint: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Label {
+                Text((isUpdated ? "Saved&Updated At" : "Saved At").localized(appLanguage))
+            } icon: {
+                Image(systemName: "location.fill")
+                    .mainWindowSymbolAnimation(.breathe, capturesClicks: false)
+            }
+            .font(.system(size: 9, weight: .black))
+            .foregroundStyle(.secondary)
+            .opacity(0.8)
+            .mainWindowSymbolHoverRegion()
+
+            if isEditing {
+                TextField("Location Name", text: $editedAddress, onCommit: {
+                    manager.updateLocationAddress(key: snapshotID, newAddress: editedAddress)
+                    isEditing = false
+                })
+                .textFieldStyle(.plain)
+                .font(.system(size: 12, weight: .bold, design: .rounded))
+                .focused($isFocused)
+                .onAppear {
+                    editedAddress = displayAddress
+                    isFocused = true
+                }
+            } else {
+                Text(displayAddress)
+                    .font(.system(size: 12, weight: .bold, design: .rounded))
+                    .foregroundStyle(.primary)
+                    .lineLimit(2)
+                    .frame(maxWidth: width, alignment: .leading)
                     .onTapGesture {
-                        let url = URL(string: "http://maps.apple.com/?ll=\(location.latitude),\(location.longitude)&q=Saved%20Location")!
-                        NSWorkspace.shared.open(url)
+                        isEditing = true
                     }
             }
-            .frame(width: 100, height: 80)
-            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-            .overlay {
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .stroke(Color.white.opacity(0.15), lineWidth: 1)
+
+            if !isEditing && showsRenameHint {
+                Text("Click to rename".localized(appLanguage))
+                    .font(.system(size: 8))
+                    .foregroundStyle(.tertiary)
             }
-            .shadow(color: .black.opacity(0.1), radius: 4, x: 0, y: 2)
-            .help(displayAddress)
-            .fixedSize()
-            
-            if !isCompact {
-                VStack(alignment: .leading, spacing: 3) {
-                    Label {
-                        Text((isUpdated ? "Saved&Updated At" : "Saved At").localized(appLanguage))
-                    } icon: {
-                        Image(systemName: "location.fill")
-                            .mainWindowSymbolAnimation(.breathe, capturesClicks: false)
-                    }
-                        .font(.system(size: 9, weight: .black))
-                        .foregroundStyle(.secondary)
-                        .opacity(0.8)
-                        .mainWindowSymbolHoverRegion()
-                    
-                    if isEditing {
-                        TextField("Location Name", text: $editedAddress, onCommit: {
-                            manager.updateLocationAddress(key: snapshotID, newAddress: editedAddress)
-                            isEditing = false
-                        })
-                        .textFieldStyle(.plain)
-                        .font(.system(size: 12, weight: .bold, design: .rounded))
-                        .focused($isFocused)
-                        .onAppear {
-                            editedAddress = displayAddress
-                            isFocused = true
-                        }
-                    } else {
-                        Text(displayAddress)
-                            .font(.system(size: 12, weight: .bold, design: .rounded))
-                            .foregroundStyle(.primary)
-                            .lineLimit(2)
-                            .frame(maxWidth: 170, alignment: .leading)
-                            .onTapGesture {
-                                isEditing = true
-                            }
-                    }
-                    
-                    if !isEditing {
-                        Text("Click to rename".localized(appLanguage))
-                            .font(.system(size: 8))
-                            .foregroundStyle(.tertiary)
-                    }
+        }
+        .frame(width: width, alignment: .leading)
+        .transition(.opacity.combined(with: .move(edge: layout == .intermediate ? .bottom : .trailing)))
+    }
+
+    var body: some View {
+        Group {
+            switch layout {
+            case .compact:
+                mapPreview
+            case .intermediate:
+                VStack(alignment: .leading, spacing: 6) {
+                    mapPreview
+                    locationDetails(width: 150, showsRenameHint: false)
                 }
-                .frame(width: 170, alignment: .leading)
-                .transition(.opacity.combined(with: .move(edge: .trailing)))
+                .frame(width: 150, alignment: .leading)
+            case .expanded:
+                HStack(spacing: 14) {
+                    mapPreview
+                    locationDetails(width: 170, showsRenameHint: true)
+                }
             }
         }
         .padding(10)
@@ -988,7 +1030,7 @@ struct LocationBlock: View {
             RoundedRectangle(cornerRadius: 20, style: .continuous)
                 .stroke(Color.white.opacity(0.05), lineWidth: 0.5)
         }
-        .animation(.spring(response: 0.35, dampingFraction: 0.85), value: isCompact)
+        .animation(.spring(response: 0.35, dampingFraction: 0.85), value: layout)
     }
 }
 
@@ -1003,7 +1045,6 @@ struct DeleteSessionAppButton: View {
                 .fill(isHovered ? Color.red.opacity(0.15) : Color.clear)
                 .frame(width: 26, height: 26)
             Image(systemName: "trash")
-                .mainWindowSymbolAnimation(.wiggleByLayer, capturesClicks: false)
                 .font(.system(size: 13, weight: .medium))
                 .foregroundStyle(isHovered ? Color.red : Color.red.opacity(0.7))
         }
@@ -1303,7 +1344,7 @@ struct AutoLayoutCenterView: View {
                             snapshot: snap,
                             selectedRecordID: manager.selectedRecordID,
                             tint: themeColor.color(seed: 0),
-                            enable3DHover: true,
+                            enable3DHover: !isViewingEarlier,
                             animateWindowReveal: true,
                             isMainWindow: true,
                             isWindowArrangementPreview: true,
@@ -1409,6 +1450,10 @@ struct AutoLayoutCenterView: View {
             .mainWindowSymbolHoverRegion()
             .controlSize(.small)
             .tint(themeColor.color(seed: 0))
+            .coloredActionButtonEffect(
+                tint: themeColor.color(seed: 0),
+                shape: AnyShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            )
             .keyboardShortcut(.escape, modifiers: [])
             .accessibilityHint(Text("Show the newest automatic capture".localized(appLanguage)))
         }
@@ -1546,8 +1591,7 @@ struct AutoLayoutSidebarWindowListView: View {
                             entry: currentDisplay,
                             isSelected: isSelected,
                             isLive: true,
-                            themeColor: themeColor,
-                            appLanguage: appLanguage
+                            themeColor: themeColor
                         )
                         .onTapGesture {
                             var t = Transaction(animation: .spring(response: 0.5, dampingFraction: 0.85))
@@ -1573,8 +1617,7 @@ struct AutoLayoutSidebarWindowListView: View {
                                     entry: displayEntry,
                                     isSelected: isSelected,
                                     isLive: false,
-                                    themeColor: themeColor,
-                                    appLanguage: appLanguage
+                                    themeColor: themeColor
                                 )
                                 .onTapGesture {
                                     var t = Transaction(animation: .spring(response: 0.5, dampingFraction: 0.85))
@@ -1777,7 +1820,6 @@ struct AutoLayoutRememberedDisplayRow: View {
     let isSelected: Bool
     let isLive: Bool
     let themeColor: ThemeColor
-    let appLanguage: AppLanguage
 
     @State private var isHovered = false
 
@@ -1795,21 +1837,9 @@ struct AutoLayoutRememberedDisplayRow: View {
                 .frame(width: 22)
 
             VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 6) {
-                    Text(displayName)
-                        .font(.system(size: 12.5, weight: .semibold, design: .rounded))
-                        .lineLimit(1)
-
-                    if isLive {
-                        Text("Live".localized(appLanguage))
-                            .font(.system(size: 10, weight: .bold))
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 1.5)
-                            .background(themeColor.color(seed: 3).opacity(0.15))
-                            .foregroundStyle(.primary)
-                            .clipShape(Capsule())
-                    }
-                }
+                Text(displayName)
+                    .font(.system(size: 12.5, weight: .semibold, design: .rounded))
+                    .lineLimit(1)
 
                 Text(String(format: "%d windows · %@", entry.previewWindowCount, entry.capturedAt.formatted(.relative(presentation: .named))))
                     .font(.system(size: 10))
@@ -1823,7 +1853,8 @@ struct AutoLayoutRememberedDisplayRow: View {
                 screenKey: entry.screenKey,
                 tint: tint,
                 isLive: isLive,
-                isHighlighted: isSelected
+                isHighlighted: isSelected,
+                badgeStatus: isLive ? .live : nil
             )
         }
         .padding(.horizontal, 10)

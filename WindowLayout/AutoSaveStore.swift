@@ -22,10 +22,43 @@ struct AutoSaveEntry: Codable, Identifiable {
     let screenKey: String
     let readableScreenKey: String?
     let records: [WindowRecord]
+    var isDisplayConnection: Bool = false
+    var isDisplayDisconnection: Bool = false
 
     var windowCount: Int { records.count }
     var previewRecords: [WindowRecord] { records.previewRecords }
     var previewWindowCount: Int { previewRecords.count }
+
+    enum CodingKeys: String, CodingKey {
+        case id, capturedAt, screenKey, readableScreenKey, records, isDisplayConnection, isDisplayDisconnection
+    }
+
+    init(id: UUID = UUID(),
+         capturedAt: Date,
+         screenKey: String,
+         readableScreenKey: String?,
+         records: [WindowRecord],
+         isDisplayConnection: Bool = false,
+         isDisplayDisconnection: Bool = false) {
+        self.id = id
+        self.capturedAt = capturedAt
+        self.screenKey = screenKey
+        self.readableScreenKey = readableScreenKey
+        self.records = records
+        self.isDisplayConnection = isDisplayConnection
+        self.isDisplayDisconnection = isDisplayDisconnection
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        self.capturedAt = try container.decode(Date.self, forKey: .capturedAt)
+        self.screenKey = try container.decode(String.self, forKey: .screenKey)
+        self.readableScreenKey = try container.decodeIfPresent(String.self, forKey: .readableScreenKey)
+        self.records = try container.decode([WindowRecord].self, forKey: .records)
+        self.isDisplayConnection = try container.decodeIfPresent(Bool.self, forKey: .isDisplayConnection) ?? false
+        self.isDisplayDisconnection = try container.decodeIfPresent(Bool.self, forKey: .isDisplayDisconnection) ?? false
+    }
 }
 
 /// One reusable window template for an app on a particular display setup.
@@ -183,12 +216,37 @@ final class AutoSaveStore: ObservableObject {
         let all = pending.map { [$0] + entries } ?? entries
         var result: [AutoSaveEntry] = []
         for entry in all {
+            // Display Connected rows are internal engine markers only — they must never
+            // appear as visible rows in the capture list UI. Disconnected rows remain
+            // visible because they carry meaningful context for the user.
+            if entry.isDisplayConnection { continue }
+
             if let last = result.last(where: { $0.screenKey == entry.screenKey }),
+               !entry.isDisplayDisconnection,
+               !last.isDisplayDisconnection,
                Self.recordsMatchGeometry(entry.records, last.records) {
                 continue
             }
             result.append(entry)
         }
+
+        // Backfill: geometry-deduplication can reduce a screen's row count below
+        // ringCapacity even when the ring holds the full set of captures. After the
+        // dedup pass, top up each screenKey from the raw ring so the capture list
+        // always shows up to ringCapacity choices per display configuration.
+        let resultIDs = Set(result.map(\.id))
+        let screenKeys = Set(result.map(\.screenKey))
+        for key in screenKeys {
+            let haveCount = result.filter { $0.screenKey == key }.count
+            guard haveCount < Self.ringCapacity else { continue }
+            let backfillCandidates = all.filter {
+                $0.screenKey == key && !resultIDs.contains($0.id) && !$0.isDisplayConnection
+            }
+            let needed = Self.ringCapacity - haveCount
+            result.append(contentsOf: backfillCandidates.prefix(needed))
+        }
+        // Re-sort: newest first, matching the original ring order.
+        result.sort { $0.capturedAt > $1.capturedAt }
         return result
     }
 
@@ -337,6 +395,10 @@ final class AutoSaveStore: ObservableObject {
     private var lastWrite: Date?
     /// Guarantees the settled arrangement reaches disk. See `armTrailingFlush`.
     private var trailingTimer: Timer?
+    /// 3-second settling delay before committing a window movement (blue symbol row).
+    /// If duplicate movement occurs within this interval, the in-flight row's thumbnail is updated in place.
+    private static let movementSettleDelay: UInt64 = 3_000_000_000
+    private var movementSettleTask: Task<Void, Never>?
     /// Set when `lastKnown` has changed but not yet reached disk, so a flush
     /// with no pending capture still writes.
     private var lastKnownIsDirty = false
@@ -344,9 +406,19 @@ final class AutoSaveStore: ObservableObject {
     /// display entry is replaced during a flush.
     private var displayEntriesIsDirty = false
     private var appWindowDefaultsIsDirty = false
-    private var log: (String) -> Void
+    /// `isDebug` marks a message as a low-level decision trace rather than a user-visible save event.
+    /// The WindowManager call site routes these to `.debug` event type so they only appear in the
+    /// dev debug panel, not the normal Activity Log.
+    private var log: (String, Bool) -> Void
 
-    init(directory: URL, log: @escaping (String) -> Void = { _ in }) {
+    /// Called by `commitPendingMovement` right before a window-move row is committed.
+    /// The closure receives the screen key of the pending entry and should return a fresh
+    /// `[WindowRecord]` snapshot of the current layout so the thumbnail reflects the final
+    /// settled position rather than the position captured at the moment of first detection.
+    /// Returns nil to use the originally-captured records as-is.
+    var onWillCommitMovement: ((_ screenKey: String) -> [WindowRecord]?)?
+
+    init(directory: URL, log: @escaping (String, Bool) -> Void = { _, _ in }) {
         self.fileURL = directory.appendingPathComponent("auto-layout.json")
         self.log = log
         load()
@@ -452,9 +524,11 @@ final class AutoSaveStore: ObservableObject {
                 screenKey: String,
                 readableScreenKey: String?,
                 now: Date = Date(),
-                force: Bool = false) {
+                force: Bool = false,
+                isDisplayConnection: Bool = false,
+                isDisplayDisconnection: Bool = false) {
         guard !records.isEmpty else {
-            log("auto-save: ignoring an empty capture")
+            log("auto-save: ignoring an empty capture", true)
             return
         }
 
@@ -466,29 +540,41 @@ final class AutoSaveStore: ObservableObject {
         // Existing captures for this screen configuration, newest first.
         let existingForScreen = entries.filter { $0.screenKey == screenKey }
 
-        // 1. Check if the incoming layout is identical to the latest capture or pending capture
-        if let p = pending, p.screenKey == screenKey, Self.recordsMatchGeometry(records, p.records) {
-            log("auto-save: layout matches pending capture — skipping duplicate snapshot")
-            return
-        }
-        if let latestCommitted = existingForScreen.first, Self.recordsMatchGeometry(records, latestCommitted.records) {
-            log("auto-save: layout matches latest committed capture — skipping duplicate snapshot")
-            pending = nil
-            return
+        let isDisplayEvent = isDisplayConnection || isDisplayDisconnection
+
+        // 1. Check if the incoming layout is identical to the latest capture or pending capture.
+        // Display connection and disconnection events bypass duplicate skips so they always
+        // create a distinct event row in history.
+        if !isDisplayEvent {
+            if let p = pending, p.screenKey == screenKey, Self.recordsMatchGeometry(records, p.records) {
+                log("auto-save: layout matches pending capture — skipping duplicate snapshot", true)
+                return
+            }
+            if let latestCommitted = existingForScreen.first, Self.recordsMatchGeometry(records, latestCommitted.records) {
+                log("auto-save: layout matches latest committed capture — skipping duplicate snapshot", true)
+                pending = nil
+                return
+            }
+
+            // Check if windows were closed without any remaining windows moving/resizing:
+            // Test against pending first (if set for this screen), then against the committed latestEntry.
+            let isSubsetOfPending = (pending?.screenKey == screenKey) && Self.isSubsetWithoutMovement(subset: records, superset: pending!.records)
+            let isSubsetOfCommitted = existingForScreen.first.map { Self.isSubsetWithoutMovement(subset: records, superset: $0.records) } ?? false
+
+            if isSubsetOfPending || isSubsetOfCommitted {
+                log("auto-save: windows closed but remaining windows did not move — skipping capture to keep existing history intact", true)
+                return
+            }
         }
 
-        // Check if windows were closed without any remaining windows moving/resizing:
-        // Test against pending first (if set for this screen), then against the committed latestEntry.
-        let isSubsetOfPending = (pending?.screenKey == screenKey) && Self.isSubsetWithoutMovement(subset: records, superset: pending!.records)
-        let isSubsetOfCommitted = existingForScreen.first.map { Self.isSubsetWithoutMovement(subset: records, superset: $0.records) } ?? false
-
-        if isSubsetOfPending || isSubsetOfCommitted {
-            log("auto-save: windows closed but remaining windows did not move — skipping capture to keep existing history intact")
-            return
+        // 2. Check if the incoming layout matches a previous capture (e.g. Capture 1 in a 2-layout toggle, or older in ring).
+        // Display events bypass ring promotion so the event row is recorded as a fresh entry at the top of history.
+        let latestIsDisplayEvent = existingForScreen.first.map { $0.isDisplayConnection || $0.isDisplayDisconnection } ?? false
+        if latestIsDisplayEvent {
+            log("auto-save: record: skipped ring-promotion — top entry is a display event row", true)
         }
-
-        // 2. Check if the incoming layout matches a previous capture (e.g. Capture 1 in a 2-layout toggle, or older in ring)
-        if let matchIndex = existingForScreen.indices.first(where: { idx in
+        if !latestIsDisplayEvent && !isDisplayEvent,
+           let matchIndex = existingForScreen.indices.first(where: { idx in
             if pending != nil && pending?.screenKey == screenKey {
                 return Self.recordsMatchGeometry(records, existingForScreen[idx].records)
             } else {
@@ -503,7 +589,9 @@ final class AutoSaveStore: ObservableObject {
                     capturedAt: now,
                     screenKey: screenKey,
                     readableScreenKey: readableScreenKey ?? matchedEntry.readableScreenKey,
-                    records: records
+                    records: records,
+                    isDisplayConnection: isDisplayConnection || matchedEntry.isDisplayConnection,
+                    isDisplayDisconnection: isDisplayDisconnection || matchedEntry.isDisplayDisconnection
                 )
                 entries.insert(updatedEntry, at: 0)
 
@@ -512,10 +600,11 @@ final class AutoSaveStore: ObservableObject {
                 displayEntries.insert(updatedEntry, at: 0)
                 displayEntriesIsDirty = true
 
-                // If pending was for this screen and had a distinct layout, preserve it as an older capture
+                // If pending was for this screen and was an established layout (>=10s old), preserve it;
+                // if it was an intermediate/transient layout (<10s old), discard it so it does not pollute history.
                 if let p = pending, p.screenKey == screenKey {
                     pending = nil
-                    if !Self.recordsMatchGeometry(p.records, records) {
+                    if !Self.recordsMatchGeometry(p.records, records) && now.timeIntervalSince(p.capturedAt) >= 10.0 {
                         entries.insert(p, at: 1)
                     }
                 }
@@ -532,7 +621,7 @@ final class AutoSaveStore: ObservableObject {
                 }
 
                 consecutiveCollapseRefusals = 0
-                log("auto-save: layout matches previous capture — rearranged layouts, promoted to latest")
+                log("auto-save: layout matches previous capture — rearranged layouts, promoted to latest", true)
                 scheduleWrite(now: now, force: force)
                 return
             }
@@ -541,51 +630,159 @@ final class AutoSaveStore: ObservableObject {
         // Diagnostic: If no match was found, explain why recent captures with the same count differed
         for (idx, candidate) in existingForScreen.prefix(3).enumerated() where candidate.windowCount == records.count {
             let diff = Self.explainGeometryDifference(records, candidate.records)
-            log("auto-save diff vs [\(idx == 0 ? "latest" : "capture #\(idx)")]: \(diff)")
+            log("auto-save diff vs [\(idx == 0 ? "latest" : "capture #\(idx)")]: \(diff)", true)
         }
 
         if let reason = collapseReason(newCount: records.count, screenKey: screenKey) {
-            consecutiveCollapseRefusals += 1
+            let elapsed = now.timeIntervalSince(lastCollapseRefusalTime)
+            if elapsed >= 1.5 {
+                consecutiveCollapseRefusals += 1
+                lastCollapseRefusalTime = now
+            }
             if consecutiveCollapseRefusals < Self.collapseRefusalLimit {
-                log("auto-save: \(reason) [\(consecutiveCollapseRefusals)/\(Self.collapseRefusalLimit)]")
+                log("auto-save: \(reason) [\(max(1, consecutiveCollapseRefusals))/\(Self.collapseRefusalLimit)]", true)
                 scheduleWrite(now: now, force: false)
                 return
             }
-            log("auto-save: \(reason) — accepting it, refused \(consecutiveCollapseRefusals) times running")
+            log("auto-save: \(reason) — accepting it, refused \(consecutiveCollapseRefusals) times running", true)
         }
         consecutiveCollapseRefusals = 0
 
-        // If an entry for this screen has the same window count and was captured
-        // within a short settling window (10s), it was likely an unplaced launch position
-        // or intermediate window move. Replace it with this settled layout rather than cluttering
-        // history with two captures of the same window count back-to-back.
-        if let p = pending, p.screenKey == screenKey, p.windowCount == records.count, now.timeIntervalSince(p.capturedAt) < 10.0 {
-            log("auto-save: updating pending layout (\(String(format: "%.1f", now.timeIntervalSince(p.capturedAt)))s old, count \(records.count)) with settled layout")
+        // 3-second settling window for window movements (blue symbol row):
+        // If an in-flight move capture already exists for this screen with the same window count,
+        // update its window records in place (so thumbnails update live) and reset the 3s delay.
+        if !isDisplayEvent,
+           let p = pending,
+           p.screenKey == screenKey,
+           !p.isDisplayConnection,
+           !p.isDisplayDisconnection,
+           p.windowCount == records.count {
+            log("auto-save: duplicate movement within 3s delay — updated thumbnail in place and reset timer (\(records.count) windows)", true)
             pending = AutoSaveEntry(id: p.id,
                                     capturedAt: now,
                                     screenKey: screenKey,
                                     readableScreenKey: readableScreenKey ?? p.readableScreenKey,
-                                    records: records)
-            scheduleWrite(now: now, force: force)
+                                    records: records,
+                                    isDisplayConnection: false,
+                                    isDisplayDisconnection: false)
+            movementSettleTask?.cancel()
+            movementSettleTask = Task { @MainActor [weak self] in
+                do {
+                    try await Task.sleep(nanoseconds: Self.movementSettleDelay)
+                } catch {
+                    return
+                }
+                guard !Task.isCancelled, let self else { return }
+                self.commitPendingMovement(now: Date())
+            }
+            objectWillChange.send()
             return
         }
 
-        if pending == nil,
-           let latest = existingForScreen.first,
-           latest.windowCount == records.count,
-           now.timeIntervalSince(latest.capturedAt) < 10.0 {
-            if let globalIndex = entries.firstIndex(where: { $0.id == latest.id }) {
-                entries.remove(at: globalIndex)
-                displayEntries.removeAll { $0.id == latest.id }
-                log("auto-save: updating recently captured layout (\(String(format: "%.1f", now.timeIntervalSince(latest.capturedAt)))s old, count \(records.count)) with settled layout")
+        // If a pending capture was waiting, commit it now before proceeding.
+        if let p = pending {
+            if now.timeIntervalSince(p.capturedAt) >= 1.5 {
+                commitPendingMovement(now: now)
+            } else {
+                // Rapid capture arrival within 1.5s — coalesce and discard the transient intermediate state
+                // instead of force-committing it to permanent history.
+                log("auto-save: coalesced rapid pending capture (\(p.windowCount) windows → \(records.count) windows within \(String(format: "%.2f", now.timeIntervalSince(p.capturedAt)))s)", true)
+                movementSettleTask?.cancel()
+                movementSettleTask = nil
+                pending = nil
             }
         }
 
+        // If window count matches existing layout (window move = blue symbol row),
+        // hold it in pending for 3 seconds so subsequent adjustments update the thumbnail in place.
+        let isSameWindowCountMove = existingForScreen.first.map { $0.windowCount == records.count } ?? false
+
+        if isSameWindowCountMove && !force && !isDisplayEvent {
+            log("auto-save: window move detected — holding 3s settling delay before committing blue capture (\(records.count) windows)", true)
+            pending = AutoSaveEntry(capturedAt: now,
+                                    screenKey: screenKey,
+                                    readableScreenKey: readableScreenKey,
+                                    records: records,
+                                    isDisplayConnection: false,
+                                    isDisplayDisconnection: false)
+            movementSettleTask?.cancel()
+            movementSettleTask = Task { @MainActor [weak self] in
+                do {
+                    try await Task.sleep(nanoseconds: Self.movementSettleDelay)
+                } catch {
+                    return
+                }
+                guard !Task.isCancelled, let self else { return }
+                self.commitPendingMovement(now: Date())
+            }
+            objectWillChange.send()
+            return
+        }
+
+        log("auto-save: record: queuing new pending entry (\(records.count) windows) for \(screenKey)", true)
         pending = AutoSaveEntry(capturedAt: now,
                                 screenKey: screenKey,
                                 readableScreenKey: readableScreenKey,
-                                records: records)
+                                records: records,
+                                isDisplayConnection: isDisplayConnection,
+                                isDisplayDisconnection: isDisplayDisconnection)
         scheduleWrite(now: now, force: force)
+    }
+
+    /// Commits an in-flight window movement capture into `entries` after the 3-second settling delay has elapsed.
+    private func commitPendingMovement(now: Date) {
+        movementSettleTask?.cancel()
+        movementSettleTask = nil
+        guard let entry = pending else { return }
+        pending = nil
+
+        // Re-capture the current window positions so the thumbnail reflects where windows
+        // actually ended up, rather than where they were at the moment of first detection.
+        // AX may still be reporting the old frame immediately after a drag; by the time the
+        // 3-second settle fires the accessibility tree is guaranteed to have the new position.
+        let freshRecords = onWillCommitMovement?(entry.screenKey)
+        var committedRecords = entry.records
+        if let freshRecords, !freshRecords.isEmpty {
+            if let rejection = collapseReason(newCount: freshRecords.count, screenKey: entry.screenKey) {
+                log("auto-save: commit-time refresh rejected — \(rejection); keeping original \(entry.windowCount)-window capture", true)
+            } else {
+                log("auto-save: refreshed window frames at commit time for accurate thumbnail (\(freshRecords.count) windows)", true)
+                committedRecords = freshRecords
+            }
+        }
+
+        let committedEntry = AutoSaveEntry(
+            id: entry.id,
+            capturedAt: entry.capturedAt,
+            screenKey: entry.screenKey,
+            readableScreenKey: entry.readableScreenKey,
+            records: committedRecords,
+            isDisplayConnection: entry.isDisplayConnection,
+            isDisplayDisconnection: entry.isDisplayDisconnection
+        )
+
+        let isDuplicateOfLatest = entries.first(where: { $0.screenKey == committedEntry.screenKey }).map {
+            Self.recordsMatchGeometry(committedEntry.records, $0.records)
+        } ?? false
+
+        if !isDuplicateOfLatest {
+            entries.insert(committedEntry, at: 0)
+            var keptPerConfiguration: [String: Int] = [:]
+            entries = entries.filter { candidate in
+                let kept = (keptPerConfiguration[candidate.screenKey] ?? 0) + 1
+                keptPerConfiguration[candidate.screenKey] = kept
+                return kept <= Self.ringCapacity
+            }
+            if entries.count > Self.ringTotalCapacity {
+                entries.removeSubrange(Self.ringTotalCapacity...)
+            }
+            displayEntries.removeAll { $0.screenKey == committedEntry.screenKey }
+            displayEntries.insert(committedEntry, at: 0)
+            displayEntriesIsDirty = true
+            log("auto-save: 3s move settling delay elapsed — committed capture to history (\(committedEntry.windowCount) windows)", true)
+            scheduleWrite(now: now, force: true)
+            objectWillChange.send()
+        }
     }
 
     /// Writes now if the coalescing interval has run out, otherwise arms the
@@ -660,9 +857,11 @@ final class AutoSaveStore: ObservableObject {
     func flush(now: Date = Date()) {
         trailingTimer?.invalidate()
         trailingTimer = nil
+        movementSettleTask?.cancel()
+        movementSettleTask = nil
         guard pending != nil || lastKnownIsDirty || displayEntriesIsDirty || appWindowDefaultsIsDirty else { return }
         guard !isUnreadable else {
-            log("auto-save: refusing to write over a file that could not be read")
+            log("auto-save: refusing to write over a file that could not be read", false)
             return
         }
         if let entry = pending {
@@ -671,9 +870,11 @@ final class AutoSaveStore: ObservableObject {
             if let existingIndex = entries.firstIndex(where: { $0.id == entry.id }) {
                 entries[existingIndex] = entry
             } else {
-                let isDuplicateOfLatest = entries.first(where: { $0.screenKey == entry.screenKey }).map {
-                    Self.recordsMatchGeometry(entry.records, $0.records)
-                } ?? false
+                let isDisplayEvent = entry.isDisplayConnection || entry.isDisplayDisconnection
+                let isDuplicateOfLatest = !isDisplayEvent
+                    && (entries.first(where: { $0.screenKey == entry.screenKey }).map {
+                        Self.recordsMatchGeometry(entry.records, $0.records)
+                    } ?? false)
 
                 if !isDuplicateOfLatest {
                     entries.insert(entry, at: 0)
@@ -727,6 +928,7 @@ final class AutoSaveStore: ObservableObject {
     /// for ever would mean auto-save had quietly stopped recording.
     private static let collapseRefusalLimit = 3
     private var consecutiveCollapseRefusals = 0
+    private var lastCollapseRefusalTime: Date = .distantPast
 
     // MARK: - Disk
 
@@ -734,9 +936,18 @@ final class AutoSaveStore: ObservableObject {
         // Deduplicate consecutive identical entries per screen configuration before saving:
         var deduplicated: [AutoSaveEntry] = []
         for entry in entries {
-            if let last = deduplicated.last(where: { $0.screenKey == entry.screenKey }),
-               Self.recordsMatchGeometry(entry.records, last.records) {
-                continue
+            if let last = deduplicated.last(where: { $0.screenKey == entry.screenKey }) {
+                // A disconnection is a meaningful history event even when its
+                // settled windows happen to match an older capture exactly.
+                if !entry.isDisplayDisconnection && !last.isDisplayDisconnection {
+                    if Self.recordsMatchGeometry(entry.records, last.records) {
+                        continue
+                    }
+                    // Drop sub-second transient artifacts (<1.5s apart for the same screen)
+                    if abs(last.capturedAt.timeIntervalSince(entry.capturedAt)) < 1.5 {
+                        continue
+                    }
+                }
             }
             deduplicated.append(entry)
         }
@@ -749,9 +960,9 @@ final class AutoSaveStore: ObservableObject {
                                                              foregroundAppByScreenKey: foregroundAppByScreenKey,
                                                              appWindowDefaults: appWindowDefaults))
             try data.write(to: fileURL, options: .atomic)
-            log("auto-save: wrote \(entries.first?.windowCount ?? 0) window(s), \(entries.count) in ring, \(displayEntries.count) display configuration(s), \(lastKnown.count) remembered, \(appWindowDefaults.count) app default(s)")
+            log("auto-save: wrote \(entries.first?.windowCount ?? 0) window(s), \(entries.count) in ring, \(displayEntries.count) display configuration(s), \(lastKnown.count) remembered, \(appWindowDefaults.count) app default(s)", false)
         } catch {
-            log("auto-save: write failed — \(error.localizedDescription)")
+            log("auto-save: write failed — \(error.localizedDescription)", false)
         }
     }
 
@@ -771,6 +982,23 @@ final class AutoSaveStore: ObservableObject {
         return latest.values.sorted { $0.capturedAt > $1.capturedAt }
     }
 
+    /// Sanitizes records to fix corrupted coordinates (such as negative offsets captured during space transitions or display disconnects).
+    private static func sanitizeRecords(_ records: [WindowRecord]) -> [WindowRecord] {
+        records.map { r in
+            guard let sf = r.screenFrame else { return r }
+            if sf.minX >= 0 && r.globalFrame.origin.x < sf.minX - 50 {
+                var corrected = r
+                let targetW = min(r.globalFrame.width, sf.width)
+                let targetH = min(r.globalFrame.height, sf.height)
+                let targetX = max(sf.minX, min(r.globalFrame.origin.x, sf.maxX - targetW))
+                let targetY = max(sf.minY, min(r.globalFrame.origin.y, sf.maxY - targetH))
+                corrected.globalFrame = CGRect(x: targetX, y: targetY, width: targetW, height: targetH)
+                return corrected
+            }
+            return r
+        }
+    }
+
     private func load() {
         let data: Data
         do {
@@ -779,31 +1007,76 @@ final class AutoSaveStore: ObservableObject {
             return
         } catch {
             isUnreadable = true
-            log("auto-save: \(fileURL.lastPathComponent) could not be read — \(error.localizedDescription)")
+            log("auto-save: \(fileURL.lastPathComponent) could not be read — \(error.localizedDescription)", false)
             return
         }
         do {
             let file = try JSONDecoder().decode(AutoSaveFile.self, from: data)
-            // Filter out duplicate captures for the same screen configuration:
+            let sanitizedRawEntries = file.entries.map { entry in
+                AutoSaveEntry(
+                    id: entry.id,
+                    capturedAt: entry.capturedAt,
+                    screenKey: entry.screenKey,
+                    readableScreenKey: entry.readableScreenKey,
+                    records: Self.sanitizeRecords(entry.records),
+                    isDisplayConnection: entry.isDisplayConnection,
+                    isDisplayDisconnection: entry.isDisplayDisconnection
+                )
+            }
+            let sanitizedRawDisplayEntries = file.displayEntries.map { entry in
+                AutoSaveEntry(
+                    id: entry.id,
+                    capturedAt: entry.capturedAt,
+                    screenKey: entry.screenKey,
+                    readableScreenKey: entry.readableScreenKey,
+                    records: Self.sanitizeRecords(entry.records),
+                    isDisplayConnection: entry.isDisplayConnection,
+                    isDisplayDisconnection: entry.isDisplayDisconnection
+                )
+            }
+            // Filter out duplicate captures or rapid transient intermediate captures for the same screen configuration:
             var deduplicatedEntries: [AutoSaveEntry] = []
-            for entry in file.entries {
-                let hasDuplicate = deduplicatedEntries.contains { existing in
-                    existing.screenKey == entry.screenKey && Self.recordsMatchGeometry(entry.records, existing.records)
+            for entry in sanitizedRawEntries {
+                let isDuplicateOrTransient = deduplicatedEntries.contains { existing in
+                    guard existing.screenKey == entry.screenKey else { return false }
+                    // Preserve unplug events as separate rows even if the layout
+                    // itself matches a nearby capture.
+                    guard !entry.isDisplayDisconnection && !existing.isDisplayDisconnection else { return false }
+                    if Self.recordsMatchGeometry(entry.records, existing.records) {
+                        return true
+                    }
+                    // Drop rapid intermediate frames (<3s apart with identical window count, or <1.5s sub-second wake artifacts)
+                    let dt = abs(existing.capturedAt.timeIntervalSince(entry.capturedAt))
+                    if existing.windowCount == entry.windowCount && dt < 3.0 {
+                        return true
+                    }
+                    if dt < 1.5 {
+                        return true
+                    }
+                    return false
                 }
-                if !hasDuplicate {
+                if !isDuplicateOrTransient {
                     deduplicatedEntries.append(entry)
                 }
             }
             entries = deduplicatedEntries
-            lastKnown = file.lastKnown
+            lastKnown = Self.sanitizeRecords(file.lastKnown)
             foregroundAppByScreenKey = file.foregroundAppByScreenKey
-            appWindowDefaults = file.appWindowDefaults
+            appWindowDefaults = file.appWindowDefaults.map { def in
+                AppWindowDefault(
+                    bundleID: def.bundleID,
+                    screenKey: def.screenKey,
+                    readableScreenKey: def.readableScreenKey,
+                    record: Self.sanitizeRecords([def.record]).first ?? def.record,
+                    updatedAt: def.updatedAt
+                )
+            }
 
             // Files written before per-display retention only have the recent
             // ring. Merge it with the new field, then recover configurations
             // that have already rolled out of the ring from the per-window
             // memory that was added for app relaunch restores.
-            var hydrated = Self.latestEntryPerDisplay(file.displayEntries + file.entries)
+            var hydrated = Self.latestEntryPerDisplay(sanitizedRawDisplayEntries + sanitizedRawEntries)
             let hydratedKeys = Set(hydrated.map(\.screenKey))
             let recovered = Dictionary(grouping: file.lastKnown, by: { $0.screenKey })
                 .filter { !hydratedKeys.contains($0.key) }
@@ -820,6 +1093,37 @@ final class AutoSaveStore: ObservableObject {
             hydrated.append(contentsOf: recovered)
             displayEntries = hydrated.sorted { $0.capturedAt > $1.capturedAt }
             displayEntriesIsDirty = Set(file.displayEntries.map(\.id)) != Set(displayEntries.map(\.id))
+
+            // Earlier versions could update `displayEntries` with a fresh
+            // unplug marker, then drop that same-layout row while deduplicating
+            // the history ring. Restore the newest missing marker from the
+            // durable per-display index so its age is not shown using an older
+            // capture's timestamp.
+            var backfilledDisplayDisconnections = false
+            for entry in displayEntries where entry.isDisplayDisconnection {
+                guard !entries.contains(where: { $0.id == entry.id }) else { continue }
+                if let newestForScreen = entries
+                    .filter({ $0.screenKey == entry.screenKey })
+                    .max(by: { $0.capturedAt < $1.capturedAt }),
+                   newestForScreen.capturedAt > entry.capturedAt {
+                    continue
+                }
+                entries.append(entry)
+                backfilledDisplayDisconnections = true
+            }
+            if backfilledDisplayDisconnections {
+                entries.sort { $0.capturedAt > $1.capturedAt }
+                var keptPerConfiguration: [String: Int] = [:]
+                entries = entries.filter { candidate in
+                    let kept = (keptPerConfiguration[candidate.screenKey] ?? 0) + 1
+                    keptPerConfiguration[candidate.screenKey] = kept
+                    return kept <= Self.ringCapacity
+                }
+                if entries.count > Self.ringTotalCapacity {
+                    entries.removeSubrange(Self.ringTotalCapacity...)
+                }
+                log("auto-save: restored missing display disconnection row(s) from display history", false)
+            }
 
             // Older files have no app templates. Recover one from the first
             // captured window for each app/display pair so an upgrade keeps
@@ -847,14 +1151,19 @@ final class AutoSaveStore: ObservableObject {
             // floor. The file's own modification date is that memory.
             lastWrite = (try? fileURL.resourceValues(forKeys: [.contentModificationDateKey]))?
                 .contentModificationDate
-            if migratedDefaults > 0 {
-                log("auto-save: migrated \(migratedDefaults) app default(s) from earlier captures")
-                flush()
+            if migratedDefaults > 0 || backfilledDisplayDisconnections || deduplicatedEntries.count != file.entries.count {
+                if migratedDefaults > 0 {
+                    log("auto-save: migrated \(migratedDefaults) app default(s) from earlier captures", false)
+                }
+                if deduplicatedEntries.count != file.entries.count {
+                    log("auto-save: pruned \(file.entries.count - deduplicatedEntries.count) rapid transient wake capture(s)", false)
+                }
+                write()
             }
-            log("auto-save: loaded \(entries.count) entr(ies), \(displayEntries.count) display configuration(s), \(lastKnown.count) remembered window(s), \(appWindowDefaults.count) app default(s)")
+            log("auto-save: loaded \(entries.count) entr(ies), \(displayEntries.count) display configuration(s), \(lastKnown.count) remembered window(s), \(appWindowDefaults.count) app default(s)", false)
         } catch {
             isUnreadable = true
-            log("auto-save: \(fileURL.lastPathComponent) could not be decoded — \(error.localizedDescription)")
+            log("auto-save: \(fileURL.lastPathComponent) could not be decoded — \(error.localizedDescription)", false)
         }
     }
 

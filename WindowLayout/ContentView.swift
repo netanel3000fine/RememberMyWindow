@@ -406,6 +406,7 @@ struct ContentView: View {
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.small)
+            .coloredActionButtonEffect()
             
             Button {
                 withAnimation {

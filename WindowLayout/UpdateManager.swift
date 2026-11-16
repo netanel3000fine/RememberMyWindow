@@ -50,18 +50,23 @@ final class UpdateManager: NSObject, ObservableObject, NSWindowDelegate {
     @Published private(set) var isChecking = false
     @Published private(set) var isDownloading = false
     @Published private(set) var downloadError: String?
+    @Published private(set) var availableUpdateVersion: String?
 
     private let defaults = UserDefaults.standard
     private var launchCheckTask: Task<Void, Never>?
     private var checkTask: Task<Void, Never>?
     private var activationObserver: NSObjectProtocol?
     private var updateWindow: NSWindow?
+    private var checkingWindow: NSWindow?
     private var promptedVersion: String?
+    private var activeCheckID: UUID?
+    private var manualCheckRequested = false
 
     private let automaticChecksKey = "updateChecksEnabled"
     private let lastCheckDateKey = "lastUpdateCheckDate"
     private let skippedVersionKey = "skippedUpdateVersion"
     private let remindLaterDateKey = "updateRemindLaterDate"
+    private let availableUpdateVersionKey = "availableUpdateVersion"
 
     var automaticChecksEnabled: Bool {
         if defaults.object(forKey: automaticChecksKey) == nil {
@@ -70,12 +75,27 @@ final class UpdateManager: NSObject, ObservableObject, NSWindowDelegate {
         return defaults.bool(forKey: automaticChecksKey)
     }
 
+    var hasAvailableUpdate: Bool {
+        guard let availableUpdateVersion,
+              AppVersion(availableUpdateVersion) > AppVersion(currentVersion) else {
+            return false
+        }
+        return defaults.string(forKey: skippedVersionKey) != availableUpdateVersion
+    }
+
     private var currentVersion: String {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0"
     }
 
     private override init() {
         super.init()
+
+        if let cachedVersion = defaults.string(forKey: availableUpdateVersionKey),
+           AppVersion(cachedVersion) > AppVersion(currentVersion) {
+            availableUpdateVersion = cachedVersion
+        } else {
+            defaults.removeObject(forKey: availableUpdateVersionKey)
+        }
     }
 
     deinit {
@@ -136,41 +156,143 @@ final class UpdateManager: NSObject, ObservableObject, NSWindowDelegate {
     }
 
     func checkForUpdates(manual: Bool = true) {
-        guard !isChecking else { return }
+        if isChecking {
+            guard manual else { return }
+            manualCheckRequested = true
+            presentCheckingWindow()
+            return
+        }
 
+        checkTask?.cancel()
+        let checkID = UUID()
+        activeCheckID = checkID
         isChecking = true
+        manualCheckRequested = manual
         downloadError = nil
         if !manual {
             // Throttle failed/offline automatic attempts too, not just successful requests.
             defaults.set(Date(), forKey: lastCheckDateKey)
+        } else {
+            presentCheckingWindow()
         }
-        checkTask?.cancel()
         checkTask = Task { @MainActor [weak self] in
             guard let self else { return }
 
             do {
                 let release = try await self.fetchLatestRelease()
+                guard !Task.isCancelled, self.activeCheckID == checkID else { return }
                 self.defaults.set(Date(), forKey: self.lastCheckDateKey)
-                self.isChecking = false
+                guard let manualResultRequested = self.finishCheck(checkID: checkID) else { return }
+                self.recordAvailableUpdate(release)
 
                 guard let release, AppVersion(release.version) > AppVersion(self.currentVersion) else {
-                    if manual {
+                    if manualResultRequested {
                         self.showUpToDateAlert()
                     }
+                    self.dismissCheckingWindow()
                     return
                 }
 
-                guard self.shouldPresent(release: release, manual: manual) else { return }
+                guard self.shouldPresent(release: release, manual: manualResultRequested) else {
+                    self.dismissCheckingWindow()
+                    return
+                }
+                self.dismissCheckingWindow()
                 self.presentUpdateWindow(for: release)
             } catch is CancellationError {
-                self.isChecking = false
+                guard self.activeCheckID == checkID else { return }
+                _ = self.finishCheck(checkID: checkID)
+                self.dismissCheckingWindow()
             } catch {
-                self.isChecking = false
-                if manual {
+                guard self.activeCheckID == checkID else { return }
+                self.defaults.set(Date(), forKey: self.lastCheckDateKey)
+                guard let manualResultRequested = self.finishCheck(checkID: checkID) else { return }
+                if manualResultRequested {
                     self.showErrorAlert(error)
                 }
+                self.dismissCheckingWindow()
             }
         }
+    }
+
+    private func finishCheck(checkID: UUID) -> Bool? {
+        guard activeCheckID == checkID else { return nil }
+        let manualResultRequested = self.manualCheckRequested
+        activeCheckID = nil
+        checkTask = nil
+        isChecking = false
+        self.manualCheckRequested = false
+        return manualResultRequested
+    }
+
+    func cancelCheck() {
+        guard activeCheckID != nil else {
+            dismissCheckingWindow()
+            return
+        }
+
+        let task = checkTask
+        activeCheckID = nil
+        checkTask = nil
+        manualCheckRequested = false
+        isChecking = false
+        dismissCheckingWindow()
+        task?.cancel()
+    }
+
+    private func presentCheckingWindow() {
+        if let checkingWindow {
+            activateApplicationForPresentation()
+            checkingWindow.makeKeyAndOrderFront(nil)
+            return
+        }
+
+        let hostingView = NSHostingView(
+            rootView: UpdateCheckingView(onCancel: { [weak self] in
+                self?.cancelCheck()
+            })
+        )
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 420, height: 150),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = lz("Software Update")
+        window.identifier = NSUserInterfaceItemIdentifier("software-update")
+        window.isReleasedWhenClosed = false
+        window.contentView = hostingView
+        window.delegate = self
+        window.center()
+
+        checkingWindow = window
+        activateApplicationForPresentation()
+        window.makeKeyAndOrderFront(nil)
+    }
+
+    private func dismissCheckingWindow() {
+        guard let checkingWindow else { return }
+        self.checkingWindow = nil
+        checkingWindow.close()
+    }
+
+    private func activateApplicationForPresentation() {
+        if NSApp.activationPolicy() != .regular {
+            NSApp.setActivationPolicy(.regular)
+        }
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func recordAvailableUpdate(_ release: AppUpdateRelease?) {
+        guard let release,
+              AppVersion(release.version) > AppVersion(currentVersion) else {
+            availableUpdateVersion = nil
+            defaults.removeObject(forKey: availableUpdateVersionKey)
+            return
+        }
+
+        availableUpdateVersion = release.version
+        defaults.set(release.version, forKey: availableUpdateVersionKey)
     }
 
     private func fetchLatestRelease() async throws -> AppUpdateRelease? {
@@ -208,7 +330,8 @@ final class UpdateManager: NSObject, ObservableObject, NSWindowDelegate {
 
     private func shouldPresent(release: AppUpdateRelease, manual: Bool) -> Bool {
         if defaults.string(forKey: skippedVersionKey) == release.version {
-            return false
+            // An explicit manual check can revisit a version the user previously skipped.
+            return manual
         }
 
         if let remindLaterDate = defaults.object(forKey: remindLaterDateKey) as? Date,
@@ -255,20 +378,27 @@ final class UpdateManager: NSObject, ObservableObject, NSWindowDelegate {
             defer: false
         )
         window.title = "Software Update"
+        window.identifier = NSUserInterfaceItemIdentifier("software-update")
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
         window.isReleasedWhenClosed = false
         window.contentView = hostingView
         window.delegate = self
         window.center()
-        window.makeKeyAndOrderFront(nil)
-
         updateWindow = window
-        NSApp.setActivationPolicy(.regular)
-        NSApp.activate(ignoringOtherApps: true)
+        activateApplicationForPresentation()
+        window.makeKeyAndOrderFront(nil)
     }
 
     func windowWillClose(_ notification: Notification) {
+        guard let closingWindow = notification.object as? NSWindow else { return }
+        if closingWindow === checkingWindow {
+            checkingWindow = nil
+            cancelCheck()
+            return
+        }
+        guard closingWindow === updateWindow else { return }
+
         updateWindow = nil
         if let promptedVersion,
            defaults.string(forKey: skippedVersionKey) != promptedVersion {
@@ -419,6 +549,7 @@ final class UpdateManager: NSObject, ObservableObject, NSWindowDelegate {
         alert.informativeText = String(format: lz("RememberMyWindows %@ is the latest version."), currentVersion)
         alert.alertStyle = .informational
         alert.addButton(withTitle: lz("OK"))
+        activateApplicationForPresentation()
         alert.runModal()
     }
 
@@ -428,12 +559,49 @@ final class UpdateManager: NSObject, ObservableObject, NSWindowDelegate {
         alert.informativeText = error.localizedDescription
         alert.alertStyle = .warning
         alert.addButton(withTitle: lz("OK"))
+        activateApplicationForPresentation()
         alert.runModal()
     }
 
     private func normalizedVersion(_ rawVersion: String) -> String {
         let trimmed = rawVersion.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.hasPrefix("v") || trimmed.hasPrefix("V") ? String(trimmed.dropFirst()) : trimmed
+    }
+}
+
+private struct UpdateCheckingView: View {
+    var onCancel: () -> Void
+
+    @AppStorage("appLanguage") private var appLanguage: AppLanguage = .auto
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack(alignment: .center, spacing: 12) {
+                ProgressView()
+                    .progressViewStyle(.circular)
+                    .controlSize(.regular)
+                    .accessibilityLabel(Text("Checking for Updates…".localized(appLanguage)))
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Checking for Updates…".localized(appLanguage))
+                        .font(.headline)
+                    Text("Connecting to GitHub to check for the latest version.".localized(appLanguage))
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            HStack {
+                Spacer()
+                Button("Cancel".localized(appLanguage), action: onCancel)
+                    .keyboardShortcut(.cancelAction)
+            }
+        }
+        .padding(22)
+        .frame(width: 420)
+        .frame(minHeight: 150)
     }
 }
 
@@ -534,10 +702,12 @@ private struct UpdatePromptView: View {
                 if hasZipPackage {
                     Button("Install Update".localized(appLanguage), action: onInstall)
                         .buttonStyle(.borderedProminent)
+                        .coloredActionButtonEffect()
                         .disabled(manager.isDownloading)
                 } else {
                     Button("View Release".localized(appLanguage), action: onOpenRelease)
                         .buttonStyle(.borderedProminent)
+                        .coloredActionButtonEffect()
                 }
             }
         }

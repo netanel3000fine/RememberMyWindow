@@ -14,7 +14,6 @@ struct ShortcutMigrationView: View {
 
     @AppStorage("themeColor") private var themeColor: ThemeColor = .default
     @Environment(\.colorScheme) private var colorScheme
-    @State private var hoverDone = false
 
     private var isKeepingLegacy: Bool { manager.hotkey == .legacyDesktopToggle }
     private var accentColor: Color { themeColor.color(seed: 0) }
@@ -133,12 +132,11 @@ struct ShortcutMigrationView: View {
                     .frame(width: 200, height: 42)
                     .background(accentColor)
                     .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                    .shadow(color: accentColor.opacity(0.35), radius: 12, x: 0, y: 4)
-                    .scaleEffect(hoverDone ? 1.03 : 1.0)
-                    .animation(.spring(response: 0.25, dampingFraction: 0.75), value: hoverDone)
             }
-            .buttonStyle(.plain)
-            .onHover { hoverDone = $0 }
+            .buttonStyle(ColoredActionButtonStyle(
+                tint: accentColor,
+                shape: AnyShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            ))
             .padding(.bottom, 26)
         }
         .frame(width: 520)

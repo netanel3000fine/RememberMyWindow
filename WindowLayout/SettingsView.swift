@@ -489,22 +489,6 @@ struct SettingsView: View {
 
                 Divider().padding(.horizontal, 12)
 
-                SettingsToggle(
-                    title: "Group other apps in submenu",
-                    subtitle: "Keep the menu bar dropdown compact by placing background apps in a submenu",
-                    icon: "filemenu.and.selection",
-                    isOn: Binding(
-                        get: { manager.store.groupOtherAppsInSubmenu },
-                        set: { newValue in
-                            manager.store.groupOtherAppsInSubmenu = newValue
-                            manager.persist()
-                        }
-                    )
-                )
-                .autoLayoutDisabled(manager.store.autoSaveEnabled, appLanguage: appLanguage)
-
-                Divider().padding(.horizontal, 12)
-
                 SettingsLanguagePicker(
                     title: "App Language",
                     subtitle: "Override the system language",
@@ -1256,6 +1240,7 @@ struct SettingsView: View {
                         }
                         .buttonStyle(.borderedProminent)
                         .controlSize(.small)
+                        .coloredActionButtonEffect()
                     }
                 }
                 .onAppear {
@@ -1315,6 +1300,7 @@ struct SettingsView: View {
                             }
                             .buttonStyle(.borderedProminent)
                             .controlSize(.small)
+                            .coloredActionButtonEffect()
                         }
                     }
                 }
@@ -1388,6 +1374,7 @@ struct SettingsView: View {
                         }
                         .buttonStyle(.borderedProminent)
                         .controlSize(.small)
+                        .coloredActionButtonEffect()
                     }
                 }
 
@@ -2267,7 +2254,8 @@ struct MenuBarIconSettingsSection: View {
     @ObservedObject private var iconManager = MenuBarIconManager.shared
 
     var body: some View {
-        SettingsSection(title: "Menu Bar Icon Style".localized(appLanguage), icon: "menubar.rectangle") {
+        VStack(spacing: 20) {
+            SettingsSection(title: "Menu Bar Icon Style".localized(appLanguage), icon: "menubar.rectangle") {
             VStack(alignment: .leading, spacing: 14) {
                 HStack(alignment: .center, spacing: 12) {
                     Text("Choose the resting and active icons shown in the macOS status bar".localized(appLanguage))
@@ -2495,6 +2483,54 @@ struct MenuBarIconSettingsSection: View {
         }
         .padding(14)
         }
+
+        // Separate Card for Menu Options
+        SettingsSection(title: "Menu Options".localized(appLanguage), icon: "filemenu.and.selection") {
+            VStack(alignment: .leading, spacing: 14) {
+                SettingsToggle(
+                    title: "Group other apps in submenu",
+                    subtitle: "Keep the menu bar dropdown compact by placing background apps in a submenu",
+                    icon: "filemenu.and.selection",
+                    isOn: Binding(
+                        get: { WindowManager.shared.store.groupOtherAppsInSubmenu },
+                        set: { newValue in
+                            WindowManager.shared.store.groupOtherAppsInSubmenu = newValue
+                            WindowManager.shared.persist()
+                        }
+                    )
+                )
+
+                // Menu preview tip
+                let menuPreviewImage: NSImage? = NSImage(contentsOfFile: Bundle.main.bundlePath + "/Contents/Resources/MenuDropdownPreview.png")
+                    ?? NSImage(contentsOfFile: "/Applications/RememberMyWindows/WindowLayout/MenuDropdownPreview.png")
+                if let img = menuPreviewImage {
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack(spacing: 5) {
+                            Image(systemName: "info.circle")
+                                .font(.system(size: 10, weight: .medium))
+                                .foregroundStyle(.secondary)
+                            Text("Preview — how your menu looks".localized(appLanguage))
+                                .font(.system(size: 10, weight: .medium))
+                                .foregroundStyle(.secondary)
+                        }
+                        Image(nsImage: img)
+                            .resizable()
+                            .interpolation(.high)
+                            .antialiased(true)
+                            .scaledToFit()
+                            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                            .overlay {
+                                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                    .strokeBorder(Color.primary.opacity(0.10), lineWidth: 0.5)
+                            }
+                            .shadow(color: .black.opacity(0.18), radius: 6, x: 0, y: 3)
+                    }
+                    .padding(.top, 4)
+                }
+            }
+            .padding(14)
+        }
+        }
     }
 }
 
@@ -2524,7 +2560,7 @@ struct MenuBarIconNavRow: View {
 
                 // Label + subtitle (currently selected preset name)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Menu Bar Icon Style".localized(appLanguage))
+                    Text("Menu Bar".localized(appLanguage))
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(.primary)
                     Text(iconManager.selectedPreset.displayName.localized(appLanguage))
@@ -2607,7 +2643,7 @@ struct MenuBarIconDetailView: View {
                     Image(systemName: "menubar.rectangle")
                         .foregroundStyle(Color.accentColor)
                         .font(.system(size: 15, weight: .semibold))
-                    Text("Menu Bar Icon Style".localized(appLanguage))
+                    Text("Menu Bar".localized(appLanguage))
                         .font(.system(size: 15, weight: .bold))
                 }
             }
@@ -3029,6 +3065,8 @@ struct NotificationChannelDetailView: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     VStack(spacing: 18) {
+                        vorssaintCoexistenceCard
+
                         // Events Section: distinct interactive cards
                         VStack(alignment: .leading, spacing: 12) {
                             HStack(spacing: 6) {
@@ -3466,6 +3504,77 @@ struct NotificationChannelDetailView: View {
                     manager.previewWelcomeNotchPill()
                 }
             )
+        }
+    }
+
+    @ViewBuilder
+    private var vorssaintCoexistenceCard: some View {
+        if channel == .notch {
+            let isRunning = VorssaintNotchCoordinator.shared.isVorssaintRunning()
+            VStack(alignment: .leading, spacing: 0) {
+                HStack(alignment: .center, spacing: 14) {
+                    if let icon = VorssaintNotchCoordinator.shared.loadVorssaintIcon() {
+                        Image(nsImage: icon)
+                            .resizable()
+                            .aspectRatio(contentMode: .fit)
+                            .frame(width: 32, height: 32)
+                            .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                    .stroke(Color.white.opacity(0.12), lineWidth: 0.5)
+                            )
+                            .shadow(color: Color.black.opacity(0.2), radius: 2, x: 0, y: 1)
+                    } else {
+                        Image(systemName: "rectangle.topthird.inset.filled")
+                            .font(.system(size: 18, weight: .semibold))
+                            .foregroundStyle(channel.color)
+                            .frame(width: 32, height: 32)
+                    }
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack(spacing: 8) {
+                            Text("Coexist with Vorssaint Notch".localized(appLanguage))
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundStyle(.primary)
+
+                            HStack(spacing: 4) {
+                                Circle()
+                                    .fill(isRunning ? Color.green : Color.secondary.opacity(0.4))
+                                    .frame(width: 6, height: 6)
+                                Text(isRunning ? "Running".localized(appLanguage) : "Not Running".localized(appLanguage))
+                                    .font(.system(size: 10, weight: .medium))
+                                    .foregroundStyle(isRunning ? .primary : .secondary)
+                            }
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(
+                                Capsule()
+                                    .fill(isRunning ? Color.green.opacity(0.12) : Color.secondary.opacity(0.1))
+                            )
+
+                            Spacer()
+
+                            Toggle("", isOn: Binding(
+                                get: { manager.store.coexistWithVorssaintNotch },
+                                set: { val in
+                                    manager.store.coexistWithVorssaintNotch = val
+                                    manager.persist()
+                                }
+                            ))
+                            .labelsHidden()
+                            .toggleStyle(.switch)
+                        }
+
+                        Text("Temporarily hides Vorssaint's notch island while RememberMyWindows displays any notch pill.".localized(appLanguage))
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .padding(14)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .liquidGlass(style: .card)
         }
     }
 

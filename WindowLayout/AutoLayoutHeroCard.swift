@@ -123,7 +123,7 @@ fileprivate enum AutoLayoutRecordMatcher {
     static func isReturningUnchangedWindow(
         _ record: WindowRecord,
         recentHistory: [[WindowRecord]],
-        tolerance: CGFloat = 2
+        tolerance: CGFloat = 4
     ) -> Bool {
         for pastRecords in recentHistory {
             for past in pastRecords {
@@ -158,6 +158,8 @@ enum AutoLayoutCaptureIndicator: Equatable {
     case sameWindowCount
     case addedWindows(Int)
     case history
+    case displayConnected
+    case displayDisconnected
 
     var color: Color {
         Color(nsColor: nsColor)
@@ -171,36 +173,70 @@ enum AutoLayoutCaptureIndicator: Equatable {
             return .systemGreen
         case .history:
             return .systemOrange
+        case .displayConnected, .displayDisconnected:
+            return .systemPurple
         }
     }
 
     static func classify(
         current: [WindowRecord],
         comparedTo older: [WindowRecord]?,
-        recentHistory: [[WindowRecord]] = []
+        previousCaptureBeforeOlder: [WindowRecord]? = nil,
+        recentHistory: [[WindowRecord]] = [],
+        startupBundleIDs: Set<String> = []
     ) -> (indicator: AutoLayoutCaptureIndicator, activityApps: [AutoLayoutCaptureAppIcon]) {
         guard let older else {
             // Strictly reserved for the baseline/oldest item at the last place of the list for aesthetic looks
             return (.history, [])
         }
         let matches = AutoLayoutRecordMatcher.match(current: current, older: older)
-        let genuinelyAddedIndices = matches.unmatchedCurrentIndices.filter { currentIndex in
-            !AutoLayoutRecordMatcher.isReturningUnchangedWindow(current[currentIndex], recentHistory: recentHistory)
-        }
-        if !genuinelyAddedIndices.isEmpty {
-            let added = AutoLayoutCaptureAppIcon.apps(in: current, at: genuinelyAddedIndices)
-            return (.addedWindows(genuinelyAddedIndices.count), added)
+        let addedIndices = newlyAddedRecordIndices(
+            current: current,
+            older: older,
+            matches: matches,
+            recentHistory: recentHistory
+        )
+
+        if !addedIndices.isEmpty {
+            let added = AutoLayoutCaptureAppIcon.apps(in: current, at: addedIndices)
+            return (.addedWindows(addedIndices.count), added)
         }
         // Check if any window moved, resized, or changed full-screen state.
         let moved = AutoLayoutCaptureAppIcon.movedApps(current: current,
                                                      older: older,
-                                                     matches: matches)
+                                                     matches: matches,
+                                                     previousCaptureBeforeOlder: previousCaptureBeforeOlder)
         if !moved.isEmpty {
             return (.sameWindowCount, moved)
         }
         // No windows moved or added: windows were closed without movement or baseline capture.
         // Never classify as .sameWindowCount when no windows moved or were added.
         return (.history, [])
+    }
+
+    /// Unmatched windows count as additions only when their app's window count rose
+    /// and they are not unchanged windows returning from a recent capture.
+    private static func newlyAddedRecordIndices(
+        current: [WindowRecord],
+        older: [WindowRecord],
+        matches: AutoLayoutRecordMatches,
+        recentHistory: [[WindowRecord]]
+    ) -> [Int] {
+        let olderCountByBundle = Dictionary(grouping: older, by: { $0.windowID.appBundleID })
+            .mapValues(\.count)
+        let currentCountByBundle = Dictionary(grouping: current, by: { $0.windowID.appBundleID })
+            .mapValues(\.count)
+
+        return matches.unmatchedCurrentIndices.filter { currentIndex in
+            let bundleID = current[currentIndex].windowID.appBundleID
+            let olderCount = olderCountByBundle[bundleID] ?? 0
+            let currentCount = currentCountByBundle[bundleID] ?? 0
+            guard olderCount == 0 || currentCount > olderCount else { return false }
+            return !AutoLayoutRecordMatcher.isReturningUnchangedWindow(
+                current[currentIndex],
+                recentHistory: recentHistory
+            )
+        }
     }
 
     static func classify(windowCount: Int, comparedTo nextOlderWindowCount: Int?) -> Self {
@@ -217,38 +253,64 @@ enum AutoLayoutCaptureIndicator: Equatable {
     static func changedRecordIDs(
         current: [WindowRecord],
         comparedTo older: [WindowRecord]?,
-        recentHistory: [[WindowRecord]] = []
+        previousCaptureBeforeOlder: [WindowRecord]? = nil,
+        recentHistory: [[WindowRecord]] = [],
+        startupBundleIDs: Set<String> = []
     ) -> Set<UUID> {
         guard let older else { return [] }
 
         let matches = AutoLayoutRecordMatcher.match(current: current, older: older)
         var changedIDs = Set<UUID>()
+        let addedIndices = newlyAddedRecordIndices(
+            current: current,
+            older: older,
+            matches: matches,
+            recentHistory: recentHistory
+        )
 
-        let genuinelyAddedIndices = matches.unmatchedCurrentIndices.filter { currentIndex in
-            !AutoLayoutRecordMatcher.isReturningUnchangedWindow(current[currentIndex], recentHistory: recentHistory)
-        }
-
-        for currentIndex in genuinelyAddedIndices {
+        for currentIndex in addedIndices {
             changedIDs.insert(current[currentIndex].id)
         }
         for (currentIndex, olderIndex) in matches.olderIndexByCurrentIndex {
-            if hasGeometryOrFullScreenChange(current[currentIndex], comparedTo: older[olderIndex]) {
-                changedIDs.insert(current[currentIndex].id)
+            guard hasGeometryOrFullScreenChange(current[currentIndex], comparedTo: older[olderIndex]) else { continue }
+            // If full-screen changed, this is a genuine user action — never suppress.
+            let fullScreenChanged = current[currentIndex].isFullScreenMode != older[olderIndex].isFullScreenMode
+                || current[currentIndex].isNativeFullScreen != older[olderIndex].isNativeFullScreen
+            if !fullScreenChanged, let oneStepPrevious = previousCaptureBeforeOlder {
+                if AutoLayoutRecordMatcher.isReturningUnchangedWindow(current[currentIndex], recentHistory: [oneStepPrevious]) {
+                    continue
+                }
             }
+            changedIDs.insert(current[currentIndex].id)
         }
 
         return changedIDs
     }
 
+    private static func effectiveFrame(_ r: WindowRecord) -> CGRect {
+        let screen = r.screenFrame ?? CGRect(x: 0, y: 0, width: 1440, height: 900)
+        let clampedX = max(screen.minX, min(screen.maxX - min(r.globalFrame.width, screen.width), r.globalFrame.origin.x))
+        let clampedY = max(screen.minY, min(screen.maxY - min(r.globalFrame.height, screen.height), r.globalFrame.origin.y))
+        return CGRect(x: clampedX, y: clampedY, width: r.globalFrame.width, height: r.globalFrame.height)
+    }
+
     fileprivate static func hasGeometryOrFullScreenChange(_ record: WindowRecord,
                                                            comparedTo olderRecord: WindowRecord,
-                                                           tolerance: CGFloat = 2) -> Bool {
-        record.isFullScreenMode != olderRecord.isFullScreenMode
+                                                           tolerance: CGFloat = 4) -> Bool {
+        let isFinderDesktop = record.windowID.appBundleID == "com.apple.finder" && record.windowID.windowTitle.isEmpty
+        let fullScreenChanged = !isFinderDesktop && (
+            record.isFullScreenMode != olderRecord.isFullScreenMode
             || record.isNativeFullScreen != olderRecord.isNativeFullScreen
-            || abs(record.globalFrame.origin.x - olderRecord.globalFrame.origin.x) > tolerance
-            || abs(record.globalFrame.origin.y - olderRecord.globalFrame.origin.y) > tolerance
-            || abs(record.globalFrame.width - olderRecord.globalFrame.width) > tolerance
-            || abs(record.globalFrame.height - olderRecord.globalFrame.height) > tolerance
+        )
+        if fullScreenChanged { return true }
+
+        let curFrame = effectiveFrame(record)
+        let oldFrame = effectiveFrame(olderRecord)
+
+        return abs(curFrame.origin.x - oldFrame.origin.x) > tolerance
+            || abs(curFrame.origin.y - oldFrame.origin.y) > tolerance
+            || abs(curFrame.width - oldFrame.width) > tolerance
+            || abs(curFrame.height - oldFrame.height) > tolerance
     }
 }
 
@@ -272,7 +334,7 @@ struct AutoLayoutCaptureAppIcon: Identifiable {
     static func movedApps(
         older: [WindowRecord]?,
         current: [WindowRecord],
-        tolerance: CGFloat = 2
+        tolerance: CGFloat = 4
     ) -> [AutoLayoutCaptureAppIcon] {
         guard let older else { return [] }
         let matches = AutoLayoutRecordMatcher.match(current: current, older: older)
@@ -282,7 +344,8 @@ struct AutoLayoutCaptureAppIcon: Identifiable {
     fileprivate static func movedApps(current: [WindowRecord],
                                       older: [WindowRecord],
                                       matches: AutoLayoutRecordMatches,
-                                      tolerance: CGFloat = 2) -> [AutoLayoutCaptureAppIcon] {
+                                      tolerance: CGFloat = 4,
+                                      previousCaptureBeforeOlder: [WindowRecord]? = nil) -> [AutoLayoutCaptureAppIcon] {
         var changedApps: [(bundleID: String, appName: String?)] = []
         for (currentIndex, olderIndex) in matches.olderIndexByCurrentIndex.sorted(by: { $0.key < $1.key }) {
             let record = current[currentIndex]
@@ -291,6 +354,19 @@ struct AutoLayoutCaptureAppIcon: Identifiable {
                 comparedTo: older[olderIndex],
                 tolerance: tolerance
             ) else { continue }
+            // If the full-screen state changed, this is an intentional user action — never suppress.
+            // Untitled Finder desktop window full-screen flip is a macOS AX quirk and is not user full-screen action.
+            let isFinderDesktop = record.windowID.appBundleID == "com.apple.finder" && record.windowID.windowTitle.isEmpty
+            let fullScreenChanged = !isFinderDesktop && (
+                record.isFullScreenMode != older[olderIndex].isFullScreenMode
+                || record.isNativeFullScreen != older[olderIndex].isNativeFullScreen
+            )
+            if !fullScreenChanged, let oneStepPrevious = previousCaptureBeforeOlder {
+                // Only suppress 1-step round-trip undo (e.g. temporary Space switch)
+                if AutoLayoutRecordMatcher.isReturningUnchangedWindow(record, recentHistory: [oneStepPrevious], tolerance: tolerance) {
+                    continue
+                }
+            }
             let bundleID = record.windowID.appBundleID
             if !changedApps.contains(where: { $0.bundleID == bundleID }) {
                 changedApps.append((bundleID, record.windowID.appName))
@@ -335,27 +411,53 @@ struct AutoLayoutCapturePresentation: Identifiable {
     var id: UUID { entry.id }
 
     /// Projects one display's newest-first entries into the rows both capture lists render.
+    @MainActor
     static func make(
         from entries: [AutoSaveEntry],
         displayScreenKey: String,
         currentScreenKey: String
     ) -> [AutoLayoutCapturePresentation] {
         let displayEntries = entries.filter { $0.screenKey == displayScreenKey }
+        // Capture the startup baseline once on the main thread and thread it
+        // through the classifier so the static functions stay nonisolated.
+        let startupIDs = WindowManager.shared.startupBundleIDs
 
         return displayEntries.enumerated().map { index, entry in
             let remainingEntries = displayEntries.dropFirst(index + 1)
             let nextOlder = remainingEntries.first
+            let oneStepPrevious = remainingEntries.dropFirst().first?.records
             let recentHistory = remainingEntries.prefix(5).map(\.records)
-            let (indicator, activityApps) = AutoLayoutCaptureIndicator.classify(
-                current: entry.records,
-                comparedTo: nextOlder?.records,
-                recentHistory: Array(recentHistory)
-            )
-            let triggeringRecordIDs = AutoLayoutCaptureIndicator.changedRecordIDs(
-                current: entry.records,
-                comparedTo: nextOlder?.records,
-                recentHistory: Array(recentHistory)
-            )
+
+            let indicator: AutoLayoutCaptureIndicator
+            let activityApps: [AutoLayoutCaptureAppIcon]
+            let triggeringRecordIDs: Set<UUID>
+
+            if entry.isDisplayConnection {
+                indicator = .displayConnected
+                activityApps = []
+                triggeringRecordIDs = []
+            } else if entry.isDisplayDisconnection {
+                indicator = .displayDisconnected
+                activityApps = []
+                triggeringRecordIDs = []
+            } else {
+                let classification = AutoLayoutCaptureIndicator.classify(
+                    current: entry.records,
+                    comparedTo: nextOlder?.records,
+                    previousCaptureBeforeOlder: oneStepPrevious,
+                    recentHistory: Array(recentHistory),
+                    startupBundleIDs: startupIDs
+                )
+                indicator = classification.indicator
+                activityApps = classification.activityApps
+                triggeringRecordIDs = AutoLayoutCaptureIndicator.changedRecordIDs(
+                    current: entry.records,
+                    comparedTo: nextOlder?.records,
+                    previousCaptureBeforeOlder: oneStepPrevious,
+                    recentHistory: Array(recentHistory),
+                    startupBundleIDs: startupIDs
+                )
+            }
 
             return AutoLayoutCapturePresentation(
                 entry: entry,
@@ -373,6 +475,20 @@ struct AutoLayoutCapturePresentation: Identifiable {
         let age = ageLabel(at: now, language: language)
         let count = entry.windowCount
 
+        if changeIndicator == .displayConnected {
+            let format = count == 1 ? "Display Connected (%@) · 1 window" : "Display Connected (%@) · %d windows"
+            return count == 1
+                ? String(format: format.localized(language), age)
+                : String(format: format.localized(language), age, count)
+        }
+
+        if changeIndicator == .displayDisconnected {
+            let format = count == 1 ? "Unplugged (%@) · 1 window" : "Unplugged (%@) · %d windows"
+            return count == 1
+                ? String(format: format.localized(language), age)
+                : String(format: format.localized(language), age, count)
+        }
+
         if isLatest {
             let format = count == 1 ? "Latest (%@) · 1 window" : "Latest (%@) · %d windows"
             return count == 1
@@ -389,6 +505,12 @@ struct AutoLayoutCapturePresentation: Identifiable {
     /// The first text segment in the main-window timeline row.
     func ageTitle(at now: Date, language: AppLanguage) -> String {
         let age = ageLabel(at: now, language: language)
+        if changeIndicator == .displayConnected {
+            return String(format: "Display Connected (%@)".localized(language), age)
+        }
+        if changeIndicator == .displayDisconnected {
+            return String(format: "Unplugged (%@)".localized(language), age)
+        }
         guard isLatest else { return age }
         return String(format: "Latest (%@)".localized(language), age)
     }
@@ -403,6 +525,9 @@ struct AutoLayoutCapturePresentation: Identifiable {
     private func ageLabel(at now: Date, language: AppLanguage) -> String {
         let seconds = now.timeIntervalSince(entry.capturedAt)
         let formatter = DateComponentsFormatter()
+        var calendar = Calendar.current
+        calendar.locale = language.locale
+        formatter.calendar = calendar
         formatter.unitsStyle = .full
         formatter.maximumUnitCount = 1
         formatter.allowedUnits = seconds < 3600
@@ -899,6 +1024,19 @@ struct AutoLayoutHeroCard: View {
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(capture.changeIndicator.color)
                         .frame(width: 20)
+                case .displayConnected:
+                    Image(systemName: "display.2")
+                        .mainWindowSymbolAnimation(.wiggleByLayer, capturesClicks: false)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(capture.changeIndicator.color)
+                        .frame(width: 20)
+                case .displayDisconnected:
+                    Image(systemName: "laptopcomputer")
+                        .mainWindowSymbolAnimation(.wiggleByLayer, capturesClicks: false)
+                        .symbolRenderingMode(.monochrome)
+                        .font(.system(size: 11, weight: .regular))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 20)
                 }
             }
         }
@@ -953,6 +1091,9 @@ struct AutoLayoutHeroCard: View {
     private func age(of date: Date) -> String {
         let seconds = now.timeIntervalSince(date)
         let f = DateComponentsFormatter()
+        var calendar = Calendar.current
+        calendar.locale = language.locale
+        f.calendar = calendar
         f.unitsStyle = .full
         f.maximumUnitCount = 1
         f.allowedUnits = seconds < 3600

@@ -304,11 +304,40 @@ final class QuickKeyRestoreManager {
 
 @MainActor
 class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+    private enum AutoSaveMenuLayout {
+        static let sharedMenuWidth: CGFloat = 270
+        static var rootWidth: CGFloat { sharedMenuWidth }
+        static var previewWidth: CGFloat { sharedMenuWidth }
+        static let windowListSubmenuWidth: CGFloat = 280
+        static let leadingColumnWidth: CGFloat = 30
+        static let submenuColumnWidth: CGFloat = 20
+        static let keyEquivalentColumnWidth: CGFloat = 36
+        static let trailingInset: CGFloat = 8
+        static let captureTitleTrailingInset: CGFloat = 8
+        // AppKit reserves the submenu arrow column; title truncation needs only this small inset.
+        static var titleWidth: CGFloat {
+            rootWidth - leadingColumnWidth - captureTitleTrailingInset
+        }
+        static let marqueeStartDelay: TimeInterval = 0.5
+        static let marqueeInterval: TimeInterval = 0.16
+    }
+
+    private struct AutoSaveMenuMarqueeEntry {
+        let item: NSMenuItem
+        let fullTitle: String
+        let initialTitle: String
+    }
+
     private var statusItem: NSStatusItem?
     private var menu: NSMenu?
     private var lastFrontmostAppID: String?
     private var autoSaveMenuIconVariants: [ObjectIdentifier: (normal: NSImage, highlighted: NSImage)] = [:]
+    private var autoSaveMenuMarqueeEntries: [ObjectIdentifier: AutoSaveMenuMarqueeEntry] = [:]
     private weak var highlightedAutoSaveMenuItem: NSMenuItem?
+    private weak var activeAutoSaveMenuMarqueeItem: NSMenuItem?
+    private var autoSaveMenuMarqueeStartWorkItem: DispatchWorkItem?
+    private var autoSaveMenuMarqueeTimer: Timer?
+    private var autoSaveMenuMarqueeOffset = 0
     private var windowServerCursorCancellable: AnyCancellable?
     private var hasWindowServerCursorOverride = false
 
@@ -445,7 +474,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // Match the main window or any potential settings/secondary windows
         return w.title == "RememberMyWindows" || 
                w.identifier?.rawValue.contains("main") == true || 
-               w.title == "Settings"
+               w.title == "Settings" ||
+               w.identifier?.rawValue == "software-update"
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
@@ -626,6 +656,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         self.statusItem?.button?.performClick(nil)
     }
 
+    func menuWillOpen(_ menu: NSMenu) {
+        guard menu === self.menu else { return }
+        menu.update()
+    }
+
     /// Tints and animates the menu bar button on left-click restore.
     private func flashStatusButton() {
         guard let button = statusItem?.button else { return }
@@ -643,11 +678,40 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard menu === self.menu else { return }
 
         restoreHighlightedAutoSaveMenuIcon()
-        guard let item,
-              let icons = autoSaveMenuIconVariants[ObjectIdentifier(item)] else { return }
+        stopAutoSaveMenuMarquee()
+        guard let item else { return }
 
-        item.image = icons.highlighted
-        highlightedAutoSaveMenuItem = item
+        if let icons = autoSaveMenuIconVariants[ObjectIdentifier(item)] {
+            item.image = icons.highlighted
+            highlightedAutoSaveMenuItem = item
+        }
+
+        guard autoSaveMenuMarqueeEntries[ObjectIdentifier(item)] != nil else { return }
+        activeAutoSaveMenuMarqueeItem = item
+
+        let startWorkItem = DispatchWorkItem { [weak self, weak item] in
+            guard let self,
+                  let item,
+                  self.activeAutoSaveMenuMarqueeItem === item,
+                  !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { return }
+
+            self.autoSaveMenuMarqueeTimer = Timer.scheduledTimer(
+                withTimeInterval: AutoSaveMenuLayout.marqueeInterval,
+                repeats: true
+            ) { [weak self, weak item] _ in
+                MainActor.assumeIsolated {
+                    guard let self,
+                          let item,
+                          self.activeAutoSaveMenuMarqueeItem === item else { return }
+                    self.advanceAutoSaveMenuMarquee(for: item)
+                }
+            }
+        }
+        autoSaveMenuMarqueeStartWorkItem = startWorkItem
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + AutoSaveMenuLayout.marqueeStartDelay,
+            execute: startWorkItem
+        )
     }
 
     private func restoreHighlightedAutoSaveMenuIcon() {
@@ -656,14 +720,110 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         highlightedAutoSaveMenuItem = nil
     }
 
+    private func stopAutoSaveMenuMarquee() {
+        autoSaveMenuMarqueeStartWorkItem?.cancel()
+        autoSaveMenuMarqueeStartWorkItem = nil
+        autoSaveMenuMarqueeTimer?.invalidate()
+        autoSaveMenuMarqueeTimer = nil
+
+        if let item = activeAutoSaveMenuMarqueeItem,
+           let entry = autoSaveMenuMarqueeEntries[ObjectIdentifier(item)] {
+            item.title = entry.initialTitle
+        }
+
+        activeAutoSaveMenuMarqueeItem = nil
+        autoSaveMenuMarqueeOffset = 0
+    }
+
+    private func advanceAutoSaveMenuMarquee(for item: NSMenuItem) {
+        let itemID = ObjectIdentifier(item)
+        guard let entry = autoSaveMenuMarqueeEntries[itemID] else {
+            stopAutoSaveMenuMarquee()
+            return
+        }
+
+        let characters = Array(entry.fullTitle)
+        guard !characters.isEmpty else { return }
+        let cycleLength = characters.count + 3
+        autoSaveMenuMarqueeOffset = (autoSaveMenuMarqueeOffset + 1) % cycleLength
+
+        let repeatedTitle = characters + Array("   ") + characters
+        var visibleTitle = ""
+        for character in repeatedTitle.dropFirst(autoSaveMenuMarqueeOffset) {
+            let candidate = visibleTitle + String(character)
+            guard menuTitleWidth(candidate) <= AutoSaveMenuLayout.titleWidth else { break }
+            visibleTitle = candidate
+        }
+        item.title = visibleTitle
+    }
+
+    private func setAutoSaveMenuTitle(_ title: String, on item: NSMenuItem) {
+        let itemID = ObjectIdentifier(item)
+        autoSaveMenuMarqueeEntries.removeValue(forKey: itemID)
+
+        let initialTitle = truncatedMenuTitle(title, maxWidth: AutoSaveMenuLayout.titleWidth)
+        item.title = initialTitle
+        item.setAccessibilityLabel(title)
+
+        if initialTitle != title {
+            autoSaveMenuMarqueeEntries[itemID] = AutoSaveMenuMarqueeEntry(
+                item: item,
+                fullTitle: title,
+                initialTitle: initialTitle
+            )
+        }
+    }
+
+    private func truncatedMenuTitle(_ title: String, maxWidth: CGFloat) -> String {
+        guard menuTitleWidth(title) > maxWidth else { return title }
+
+        let ellipsis = "…"
+        var visiblePrefix = ""
+        for character in title {
+            let candidate = visiblePrefix + String(character) + ellipsis
+            guard menuTitleWidth(candidate) <= maxWidth else { break }
+            visiblePrefix += String(character)
+        }
+        return visiblePrefix.isEmpty ? ellipsis : visiblePrefix + ellipsis
+    }
+
+    private func setRootMenuTitle(_ title: String, on item: NSMenuItem) {
+        let submenuWidth = item.submenu == nil ? 0 : AutoSaveMenuLayout.submenuColumnWidth
+        let keyEquivalentWidth = item.keyEquivalent.isEmpty ? 0 : AutoSaveMenuLayout.keyEquivalentColumnWidth
+        let trailingInset = submenuWidth == 0 && keyEquivalentWidth == 0
+            ? AutoSaveMenuLayout.trailingInset
+            : 0
+        let titleWidth = max(
+            0,
+            AutoSaveMenuLayout.rootWidth - AutoSaveMenuLayout.leadingColumnWidth
+                - submenuWidth - keyEquivalentWidth - trailingInset
+        )
+        item.title = truncatedMenuTitle(title, maxWidth: titleWidth)
+        item.setAccessibilityLabel(title)
+    }
+
+    private func menuTitleWidth(_ title: String) -> CGFloat {
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.menuFont(ofSize: 0)
+        ]
+        return ceil((title as NSString).size(withAttributes: attributes).width)
+    }
+
     // Called right after the menu closes so we can detach it
     func menuDidClose(_ menu: NSMenu) {
+        stopAutoSaveMenuMarquee()
         restoreHighlightedAutoSaveMenuIcon()
         autoSaveMenuIconVariants.removeAll()
+        autoSaveMenuMarqueeEntries.removeAll()
         statusItem?.menu = nil
     }
 
     // MARK: - Menu
+
+    private func checkForUpdatesAccessibilityLabel(_ title: String, hasAvailableUpdate: Bool) -> String {
+        guard hasAvailableUpdate else { return title }
+        return "\(title), \(lz("A new version of RememberMyWindows is available!"))"
+    }
 
     private func menuSymbolImage(_ symbolName: String) -> NSImage? {
         let config = NSImage.SymbolConfiguration(pointSize: 13, weight: .regular)
@@ -782,6 +942,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let menu = NSMenu()
         self.menu = menu
         menu.delegate = self
+        menu.minimumWidth = AutoSaveMenuLayout.rootWidth
 
         if WindowManager.shared.store.autoSaveEnabled {
             setupAutoSaveMenu(menu)
@@ -810,6 +971,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         let openItem = menu.addItem(withTitle: openTitle, action: #selector(openMainWindow), keyEquivalent: "o")
         openItem.image = applicationIconMenuImage() ?? menuSymbolImage("macwindow.on.rectangle")
+        setRootMenuTitle(openTitle, on: openItem)
         menu.addItem(NSMenuItem.separator())
 
         if let snap = WindowManager.shared.currentApplicableSnapshot {
@@ -821,11 +983,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let restoreTitle = String(format: lz("Full Restore '%@'"), restoreSource.displayName)
             let restoreItem = menu.addItem(withTitle: restoreTitle, action: #selector(restoreNow), keyEquivalent: "r")
             restoreItem.image = menuSymbolImage("arrow.counterclockwise")
+            setRootMenuTitle(restoreTitle, on: restoreItem)
 
             let updateTitle = String(format: lz("Update Full Layout '%@'"), snap.displayName)
             let updateItem = menu.addItem(withTitle: updateTitle, action: #selector(saveLayout), keyEquivalent: "s")
             updateItem.isEnabled = !WindowManager.shared.isUpdateRestricted
             updateItem.image = menuSymbolImage("arrow.triangle.2.circlepath")
+            setRootMenuTitle(updateTitle, on: updateItem)
             
             // Native Single App Add / Update Menu Item
             if let appID = activeAppID, appID != "com.netanel.remembermywindows" {
@@ -850,6 +1014,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 } else {
                     singleAppItem.image = menuSymbolImage(isSaved ? "arrow.clockwise" : "plus")
                 }
+                setRootMenuTitle(itemTitle, on: singleAppItem)
             }
             
             let groupSubmenu = WindowManager.shared.store.groupOtherAppsInSubmenu
@@ -870,7 +1035,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 hostingView.layout()
                 let size = hostingView.fittingSize
                 let viewHeight = size.height > 0 ? size.height : CGFloat(displayRecords.count * 36 + 12)
-                hostingView.frame = CGRect(x: 0, y: 0, width: 280, height: viewHeight)
+                hostingView.frame = CGRect(x: 0, y: 0, width: AutoSaveMenuLayout.rootWidth, height: viewHeight)
                 hostingView.autoresizingMask = [.width]
                 listViewItem.view = hostingView
                 menu.addItem(listViewItem)
@@ -878,9 +1043,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
             if groupSubmenu && !otherRecords.isEmpty {
                 let otherAppsMenu = NSMenu()
+                otherAppsMenu.minimumWidth = AutoSaveMenuLayout.windowListSubmenuWidth
                 let otherAppsItem = NSMenuItem(title: lz("Others Saved in your session"), action: nil, keyEquivalent: "")
                 otherAppsItem.image = menuSymbolImage("square.stack.3d.up")
                 otherAppsItem.submenu = otherAppsMenu
+                setRootMenuTitle(otherAppsItem.title, on: otherAppsItem)
 
                 let submenuItem = NSMenuItem()
                 let subHostingView = NSHostingView(rootView: MenuWindowListView(snapshot: snap, activeBundleID: lastFrontmostAppID, specificRecords: otherRecords)
@@ -890,7 +1057,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 subHostingView.layout()
                 let subSize = subHostingView.fittingSize
                 let subViewHeight = subSize.height > 0 ? subSize.height : CGFloat(otherRecords.count * 36 + 12)
-                subHostingView.frame = CGRect(x: 0, y: 0, width: 280, height: subViewHeight)
+                subHostingView.frame = CGRect(x: 0, y: 0, width: AutoSaveMenuLayout.windowListSubmenuWidth, height: subViewHeight)
                 subHostingView.autoresizingMask = [.width]
                 submenuItem.view = subHostingView
                 otherAppsMenu.addItem(submenuItem)
@@ -902,9 +1069,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let updateItem = menu.addItem(withTitle: updateTitle, action: #selector(saveLayout), keyEquivalent: "s")
             updateItem.isEnabled = !WindowManager.shared.isUpdateRestricted
             updateItem.image = menuSymbolImage("arrow.triangle.2.circlepath")
+            setRootMenuTitle(updateTitle, on: updateItem)
             
-            let restoreItem = menu.addItem(withTitle: lz("Full Restore Default Layout"), action: #selector(restoreNow), keyEquivalent: "r")
+            let restoreTitle = lz("Full Restore Default Layout")
+            let restoreItem = menu.addItem(withTitle: restoreTitle, action: #selector(restoreNow), keyEquivalent: "r")
             restoreItem.image = menuSymbolImage("arrow.counterclockwise")
+            setRootMenuTitle(restoreTitle, on: restoreItem)
         }
 
         // Saved sessions submenu
@@ -912,6 +1082,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let savedItem = NSMenuItem(title: lz("Saved Sessions"), action: nil, keyEquivalent: "")
         savedItem.image = menuSymbolImage("folder")
         savedItem.submenu = savedMenu
+        setRootMenuTitle(savedItem.title, on: savedItem)
 
         let savedSnapshots = WindowManager.shared.store.snapshots.values
             .filter { !$0.isAutoSave }
@@ -923,14 +1094,26 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let currentSnap = WindowManager.shared.currentApplicableSnapshot
             let themeStr = UserDefaults.standard.string(forKey: "themeColor") ?? "Default"
             let currentTheme = ThemeColor(rawValue: themeStr) ?? .default
+            let languageString = UserDefaults.standard.string(forKey: "appLanguage") ?? "system"
+            let menuLanguage = AppLanguage(rawValue: languageString) ?? .auto
 
             for snap in savedSnapshots {
                 let isApplicable = (currentSnap?.id == snap.id)
                 let itemTint = isApplicable ? currentTheme.color(seed: 0) : Color.primary
                 let item = NSMenuItem(title: snap.displayName, action: #selector(restoreSpecificSnapshot(_:)), keyEquivalent: "")
                 item.representedObject = snap.id.uuidString
-                if let thumb = ScreenLayoutThumbnail.renderImage(screenKey: snap.screenKey, tint: itemTint, isLive: isApplicable) {
+                let badgeStatus: ScreenLayoutThumbnail.BadgeStatus? = isApplicable ? .live : nil
+                if let thumb = ScreenLayoutThumbnail.renderImage(
+                    screenKey: snap.screenKey,
+                    tint: itemTint,
+                    isLive: isApplicable,
+                    badgeStatus: badgeStatus,
+                    language: menuLanguage
+                ) {
                     item.image = thumb
+                }
+                if let badgeStatus {
+                    item.setAccessibilityLabel("\(snap.displayName), \(badgeStatus.localizedTitle(for: menuLanguage))")
                 }
                 savedMenu.addItem(item)
             }
@@ -938,25 +1121,33 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(savedItem)
 
         menu.addItem(NSMenuItem.separator())
-        let updateItem = menu.addItem(withTitle: lz("Check for Updates…"), action: #selector(checkForUpdates), keyEquivalent: "")
-        updateItem.image = menuSymbolImage("arrow.down.circle")
+        addCheckForUpdatesMenuItem(to: menu)
+        menu.addItem(makeVersionFooterMenuItem())
 
         menu.addItem(NSMenuItem.separator())
         let quitItem = menu.addItem(withTitle: lz("Quit"), action: #selector(quitApp), keyEquivalent: "q")
         quitItem.image = menuSymbolImage("power")
+        setRootMenuTitle(quitItem.title, on: quitItem)
     }
 
     private func setupAutoSaveMenu(_ menu: NSMenu) {
-        let openItem = menu.addItem(withTitle: lz("Open RememberMyWindows"), action: #selector(openMainWindow), keyEquivalent: "o")
+        let openItem = NSMenuItem(
+            title: lz("Open RememberMyWindows"),
+            action: #selector(openMainWindow),
+            keyEquivalent: "o"
+        )
+        openItem.target = self
         openItem.image = applicationIconMenuImage() ?? menuSymbolImage("macwindow.on.rectangle")
+        setRootMenuTitle(openItem.title, on: openItem)
+        menu.addItem(openItem)
         menu.addItem(NSMenuItem.separator())
 
         let headerTitle = lz("Recent Auto Captures")
         let headerItem = NSMenuItem()
         headerItem.isEnabled = false
-        let headerView = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 20))
+        let headerView = NSView(frame: NSRect(x: 0, y: 0, width: AutoSaveMenuLayout.rootWidth, height: 20))
         let headerLabel = NSTextField(labelWithString: headerTitle)
-        headerLabel.frame = NSRect(x: 16, y: 2, width: 300, height: 16)
+        headerLabel.frame = NSRect(x: 16, y: 2, width: AutoSaveMenuLayout.rootWidth - 32, height: 16)
         headerLabel.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize, weight: .semibold)
         headerLabel.textColor = .secondaryLabelColor
         headerView.addSubview(headerLabel)
@@ -977,6 +1168,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if matchingEntries.isEmpty {
             let emptyItem = NSMenuItem(title: lz("No auto captures yet"), action: nil, keyEquivalent: "")
             emptyItem.isEnabled = false
+            setAutoSaveMenuTitle(emptyItem.title, on: emptyItem)
             menu.addItem(emptyItem)
         } else {
             let themeStr = UserDefaults.standard.string(forKey: "themeColor") ?? "Default"
@@ -994,6 +1186,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     action: #selector(restoreAutoSaveEntry(_:)),
                     keyEquivalent: ""
                 )
+                setAutoSaveMenuTitle(title, on: item)
                 item.representedObject = entry.id.uuidString
 
                 let indicator = capture.changeIndicator
@@ -1016,6 +1209,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 case .history:
                     normalIcon = menuColoredSymbolImage("clock.arrow.circlepath", color: indicator.nsColor)
                     highlightedIcon = menuColoredSymbolImage("clock.arrow.circlepath", color: .black)
+                case .displayConnected:
+                    normalIcon = menuColoredSymbolImage("display.2", color: indicator.nsColor)
+                    highlightedIcon = menuColoredSymbolImage("display.2", color: .black)
+                case .displayDisconnected:
+                    normalIcon = menuSymbolImage("laptopcomputer")
+                    highlightedIcon = menuSymbolImage("laptopcomputer")
                 }
 
                 item.image = normalIcon
@@ -1028,11 +1227,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
                 // Hover flyout showing the visual preview and its title-row restore action.
                 let previewMenu = NSMenu()
+                previewMenu.minimumWidth = AutoSaveMenuLayout.previewWidth
                 let previewMenuItem = NSMenuItem()
                 let entryID = entry.id
 
                 let previewView = AutoSavePreviewCardView(
                     snapshot: snap,
+                    menuWidth: AutoSaveMenuLayout.previewWidth,
                     indicator: indicator,
                     activityApps: capture.activityApps,
                     triggeringRecordIDs: capture.triggeringRecordIDs,
@@ -1046,7 +1247,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
                 let hostingView = NSHostingView(rootView: previewView)
                 hostingView.wantsLayer = true
-                hostingView.frame = CGRect(x: 0, y: 0, width: 320, height: 210)
+                hostingView.frame = CGRect(x: 0, y: 0, width: AutoSaveMenuLayout.previewWidth, height: 210)
                 previewMenuItem.view = hostingView
                 previewMenu.addItem(previewMenuItem)
 
@@ -1056,12 +1257,49 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         menu.addItem(NSMenuItem.separator())
-        let updateItem = menu.addItem(withTitle: lz("Check for Updates…"), action: #selector(checkForUpdates), keyEquivalent: "")
-        updateItem.image = menuSymbolImage("arrow.down.circle")
+        addCheckForUpdatesMenuItem(to: menu)
+        menu.addItem(makeVersionFooterMenuItem())
 
         menu.addItem(NSMenuItem.separator())
-        let quitItem = menu.addItem(withTitle: lz("Quit"), action: #selector(quitApp), keyEquivalent: "q")
+        let quitItem = NSMenuItem(title: lz("Quit"), action: #selector(quitApp), keyEquivalent: "q")
+        quitItem.target = self
         quitItem.image = menuSymbolImage("power")
+        setRootMenuTitle(quitItem.title, on: quitItem)
+        menu.addItem(quitItem)
+    }
+
+    private func addCheckForUpdatesMenuItem(to menu: NSMenu) {
+        let title = lz("Check for Updates…")
+        let item = NSMenuItem(title: title, action: #selector(checkForUpdates), keyEquivalent: "")
+        item.target = self
+        item.image = menuSymbolImage("arrow.down.circle")
+        let hasAvailableUpdate = UpdateManager.shared.hasAvailableUpdate
+        let displayTitle = hasAvailableUpdate ? "\(title)\(lz(" (Update Available)"))" : title
+        setRootMenuTitle(displayTitle, on: item)
+        item.setAccessibilityLabel(
+            checkForUpdatesAccessibilityLabel(title, hasAvailableUpdate: hasAvailableUpdate)
+        )
+        menu.addItem(item)
+    }
+
+    private func makeVersionFooterMenuItem() -> NSMenuItem {
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0"
+        let versionText = "RememberMyWindows v\(version)"
+        let item = NSMenuItem()
+        item.isEnabled = false
+
+        let footerView = NSView(frame: NSRect(x: 0, y: 0, width: AutoSaveMenuLayout.rootWidth, height: 20))
+        footerView.autoresizingMask = [.width]
+
+        let label = NSTextField(labelWithString: versionText)
+        label.frame = NSRect(x: 16, y: 2, width: AutoSaveMenuLayout.rootWidth - 32, height: 16)
+        label.autoresizingMask = [.width]
+        label.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize, weight: .semibold)
+        label.textColor = .secondaryLabelColor
+        footerView.addSubview(label)
+
+        item.view = footerView
+        return item
     }
 
     @objc private func restoreAutoSaveEntry(_ sender: NSMenuItem) {
@@ -1147,16 +1385,30 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         positionHUD?.close()
         positionHUD = nil
 
-        let hud = NotchPositionHUDWindow(appName: appName, bundleID: appID)
-        hud.onDone = { [weak self] in
-            WindowManager.shared.updateOrAddAppInActiveSnapshot(bundleID: appID)
-            self?.positionHUD = nil
+        let presentHUD = { [weak self] in
+            guard let self = self else { return }
+            let hud = NotchPositionHUDWindow(appName: appName, bundleID: appID)
+            if WindowManager.shared.store.coexistWithVorssaintNotch {
+                hud.onDismissCompleted = {
+                    VorssaintNotchCoordinator.shared.didDismissPill()
+                }
+            }
+            hud.onDone = { [weak self] in
+                WindowManager.shared.updateOrAddAppInActiveSnapshot(bundleID: appID)
+                self?.positionHUD = nil
+            }
+            hud.onCancel = { [weak self] in
+                self?.positionHUD = nil
+            }
+            hud.show()
+            self.positionHUD = hud
         }
-        hud.onCancel = { [weak self] in
-            self?.positionHUD = nil
+
+        if WindowManager.shared.store.coexistWithVorssaintNotch {
+            VorssaintNotchCoordinator.shared.prepareForPill(completion: presentHUD)
+        } else {
+            presentHUD()
         }
-        hud.show()
-        positionHUD = hud
     }
 
     @objc private func saveLayout() {
